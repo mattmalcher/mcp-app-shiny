@@ -141,6 +141,7 @@ still HTML, CSS and JavaScript. See the README and
 | `sandbox_app(allowed_host_origins=…)` | ASGI app serving the sandbox proxy; deploy on its own hostname |
 | `start_sandbox_server(port=8765, *, public_host="localhost", …)` | Development only: runs it in a background thread |
 | `check_sandbox(sandbox_url, host_origin)` / `shiny-mcp-sandbox --check URL --host-origin ORIGIN` | Server-side diagnosis of a deployed sandbox; see [deployment.md](deployment.md#diagnosing-sandbox-problems) |
+| `frame_ancestors_verdict(policies, host_origin, self_origin)` | Whether CSP headers let an origin frame a page: `allows`, `blocks`, `inconclusive` or `absent` (CSP Level 3 source matching) |
 | `shiny-mcp-sandbox [--host H] [--port P] [--allow-host-origin O …]` | Serve it from the command line |
 
 ## Debugging

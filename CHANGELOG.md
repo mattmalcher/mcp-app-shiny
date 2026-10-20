@@ -52,6 +52,9 @@
   `shiny_mcp_host.sandbox.check_sandbox()`: server-side diagnosis of a
   deployed sandbox (reachability, redirects, TLS, authentication,
   `frame-ancestors` / `X-Frame-Options`).
+  It matches `frame-ancestors` source expressions properly (CSP Level 3:
+  wildcards, ports, scheme upgrade; every policy must allow the app) and
+  reports forms it does not model as `INCONCLUSIVE`, never as a pass.
 - Browser-side failures carry distinct `data-error-code`s:
   `sandbox_config`, `sandbox_unreachable` (with next steps in the message),
   `view_init_timeout`, `view_failed`; the code is also logged by Python.
@@ -59,6 +62,11 @@
   `make connect-bundles`, `make rehearse-connect`, `scripts/check_deployment.py`,
   [docs/deployment.md](docs/deployment.md) and the validation runbook
   [docs/posit-connect-validation.md](docs/posit-connect-validation.md).
+- `scripts/check_deployment.py` always writes `evidence.json` (crashes become
+  failed checks with tracebacks; an interrupted run is never `passed`), and
+  only counts an explicit 401/403 or login redirect as proof that the MCP
+  server requires authentication (timeouts and other errors are
+  `INCONCLUSIVE`).
 - The sales explorer example reads `SHINY_MCP_SANDBOX_URL` (deployed sandbox)
   and `MCP_SERVER_API_KEY` (sent as `Authorization: Key …`, Python-side only).
 

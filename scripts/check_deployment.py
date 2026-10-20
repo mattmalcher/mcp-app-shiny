@@ -18,8 +18,10 @@ Runs, in order, and reports each check as PASS/FAIL:
 Server checks passing while browser checks fail points at the browser side (frame
 headers seen only by browsers, mixed content, login redirects inside the frame).
 Writes evidence (sanitized headers, versions, results, screenshots) to --evidence-dir.
-Exit code 0 only if every check passed. Credentials are read from the environment
-(APP_API_KEY, MCP_API_KEY) and never written to the evidence.
+Exit code 0 only if every check passed; INCONCLUSIVE counts as not passed. The evidence
+file is written even when a stage crashes (the crash is recorded as a failed check).
+Credentials are read from the environment (APP_API_KEY, MCP_API_KEY) and never
+written to the evidence.
 
 Needs the dev environment (`make setup-dev`: Playwright + Chromium); no Node.
 """
@@ -34,7 +36,9 @@ import platform
 import re
 import sys
 import time
+import traceback
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -69,15 +73,18 @@ class Check:
     name: str
     ok: bool
     detail: str
+    #: Could not decide (counts as not passed): e.g. a timeout where an auth refusal was expected.
+    inconclusive: bool = False
 
 
 class Report:
     def __init__(self) -> None:
         self.checks: list[Check] = []
 
-    def add(self, stage: str, name: str, ok: bool, detail: str) -> bool:
-        self.checks.append(Check(stage, name, ok, detail))
-        print(f"{'PASS' if ok else 'FAIL'}  [{stage}] {name}: {detail}", flush=True)
+    def add(self, stage: str, name: str, ok: bool, detail: str, *, inconclusive: bool = False) -> bool:
+        self.checks.append(Check(stage, name, ok, detail, inconclusive))
+        label = "PASS" if ok else "INCONCLUSIVE" if inconclusive else "FAIL"
+        print(f"{label}  [{stage}] {name}: {detail}", flush=True)
         return ok
 
     @property
@@ -118,7 +125,7 @@ def sanitized_headers(url: str) -> dict[str, Any]:
 def check_server_side(report: Report, args: argparse.Namespace, evidence: dict[str, Any]) -> None:
     app_origin = origin(args.app_url)
     for c in check_sandbox(args.sandbox_url, app_origin):
-        report.add("server", f"sandbox {c.name}", c.ok, c.detail)
+        report.add("server", f"sandbox {c.name}", c.ok, c.detail, inconclusive=c.inconclusive)
     page = f"{args.sandbox_url}?{urlencode({'host': app_origin, 'nonce': 'x' * 32})}"
     evidence["sandbox_response"] = sanitized_headers(page)
     evidence["app_response"] = sanitized_headers(args.app_url)
@@ -143,13 +150,72 @@ def check_mcp(report: Report, url: str, key: str | None) -> None:
         report.add("server", "mcp reachable", False, f"{type(e).__name__}: {e}")
         return
     if key:
-        try:
-            asyncio.run(tools(None))
-            report.add("server", "mcp requires auth", False, "listed tools without credentials")
-        except Exception as e:  # noqa: BLE001 - expected
-            report.add(
-                "server", "mcp requires auth", True, f"refused without credentials ({type(e).__name__})"
-            )
+        verdict, detail = classify_unauthenticated(*post_without_credentials(url))
+        report.add(
+            "server",
+            "mcp requires auth",
+            verdict == "rejected",
+            detail,
+            inconclusive=verdict == "inconclusive",
+        )
+
+
+INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "check_deployment", "version": __version__},
+    },
+}
+
+
+def post_without_credentials(url: str) -> tuple[int | None, str | None, str | None]:
+    """POST an MCP ``initialize`` with no credentials: (status, Location, network error)."""
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a: Any, **k: Any) -> None:
+            return None
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(INITIALIZE).encode(),
+        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+        method="POST",
+    )
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=20) as r:
+            return r.status, None, None
+    except HTTPError as e:
+        return e.code, e.headers.get("Location") if e.headers else None, None
+    except (URLError, OSError) as e:
+        return None, None, f"{type(e).__name__}: {getattr(e, 'reason', e)}"
+
+
+def classify_unauthenticated(status: int | None, location: str | None, error: str | None) -> tuple[str, str]:
+    """Classify a credential-less MCP request: ``rejected``, ``served`` or ``inconclusive``.
+
+    Only an explicit authentication refusal (401/403, or a redirect to a login
+    page) counts as evidence that the server requires credentials. A success
+    means it does not; anything else (timeouts, 5xx, other redirects or client
+    errors) says nothing about authentication.
+    """
+    if error is not None:
+        return (
+            "inconclusive",
+            f"no HTTP answer without credentials ({error}); cannot tell if auth is enforced",
+        )
+    if status in (401, 403):
+        return "rejected", f"HTTP {status} without credentials"
+    login = location is not None and re.search(r"__login__|/login|/connect/#/login", location) is not None
+    if status is not None and 300 <= status < 400 and login:
+        return "rejected", f"HTTP {status} redirect to a login page without credentials"
+    if status is not None and 200 <= status < 300:
+        return "served", f"HTTP {status}: the MCP server answered without credentials"
+    where = f" to {re.sub(r'[?#].*', '', location)}" if location else ""
+    return "inconclusive", f"HTTP {status}{where} without credentials is not an authentication refusal"
 
 
 # ------------------------------------------------------------------ browser
@@ -362,14 +428,38 @@ def main() -> None:
             "MCP_API_KEY": bool(os.environ.get("MCP_API_KEY")),
         },
     }
-    check_server_side(report, args, evidence)
-    if not args.skip_browser:
-        check_browser(report, args, evidence, args.evidence_dir)
-    evidence["checks"] = [asdict(c) for c in report.checks]
-    evidence["passed"] = report.ok
-    (args.evidence_dir / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
-    print(f"\n{'ALL CHECKS PASSED' if report.ok else 'SOME CHECKS FAILED'}; evidence in {args.evidence_dir}/")
+    completed = False
+    try:
+        run_stage(report, evidence, "server", lambda: check_server_side(report, args, evidence))
+        if not args.skip_browser:
+            run_stage(
+                report,
+                evidence,
+                "browser",
+                lambda: check_browser(report, args, evidence, args.evidence_dir),
+            )
+        completed = True
+    finally:
+        # Failed deployments are when this report matters most: always write it.
+        evidence["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        evidence["checks"] = [asdict(c) for c in report.checks]
+        evidence["completed"] = completed  # False if interrupted: a partial run never passes
+        evidence["passed"] = report.ok and completed
+        path = args.evidence_dir / "evidence.json"
+        path.write_text(json.dumps(evidence, indent=2, default=str), encoding="utf-8")
+    print(f"\n{'ALL CHECKS PASSED' if report.ok else 'SOME CHECKS DID NOT PASS'}; evidence in {path}")
     sys.exit(0 if report.ok else 1)
+
+
+def run_stage(report: Report, evidence: dict[str, Any], stage: str, run: Callable[[], None]) -> None:
+    """Run one stage; an unexpected exception becomes a failed check with its traceback in the evidence."""
+    try:
+        run()
+    except Exception as e:  # noqa: BLE001 - recorded, and the run continues to the evidence file
+        report.add(stage, "unexpected error", False, f"{type(e).__name__}: {str(e)[:500]}")
+        evidence.setdefault("errors", []).append(
+            {"stage": stage, "traceback": traceback.format_exc()[-4000:]}
+        )
 
 
 if __name__ == "__main__":

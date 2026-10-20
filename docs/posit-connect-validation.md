@@ -30,6 +30,13 @@ what Connect does differently.
 > the status note, and any corrected commands) and this runbook's "Results"
 > section with what you observed, remove the temporary content, and summarise
 > what passed, what failed and what remains open.
+>
+> Once the three-content baseline is validated, evaluate serving Shiny and the
+> sandbox from one ASGI application, accessed through separate hostnames (see
+> "Next step: one application, two hostnames"). Keep the three-content
+> deployment as the baseline until the combined arrangement is validated. A
+> separate process is a deployment choice, not the browser isolation
+> requirement.
 
 ## 1. Prerequisites
 
@@ -118,7 +125,9 @@ SANDBOX_URL=$SANDBOX_HOST/content/<sandbox-guid>/sandbox.html
 .venv/bin/shiny-mcp-sandbox --check "$SANDBOX_URL" --host-origin "$CONNECT_SERVER"
 ```
 
-Every line must be `PASS`. It covers: the alias resolves and its TLS
+Every line must be `PASS`; `INCONCLUSIVE` means the check could not decide
+(for example a `frame-ancestors` source with a path, which it does not model)
+and counts as not passed until confirmed in a browser. It covers: the alias resolves and its TLS
 certificate verifies; `sandbox.html` answers `200` **without a redirect** and
 without asking for a login; the response is the shiny-mcp-host sandbox page
 with the restrictive CSP and `frame-ancestors $CONNECT_SERVER`; there is no
@@ -148,7 +157,10 @@ APP_API_KEY=... MCP_API_KEY=... .venv/bin/python scripts/check_deployment.py \
 ```
 
 It repeats the server-side checks, checks the MCP server directly (reachable
-with `MCP_API_KEY`, refused without it), then drives Chromium through:
+with `MCP_API_KEY`; then an unauthenticated `initialize` must be refused with
+401/403 or a redirect to a login page; a timeout, 5xx or other status is
+reported `INCONCLUSIVE`, not as proof of authentication), then drives
+Chromium through:
 
 1. open the Shiny app; Shiny connects;
 2. ask *"Explore Q3 sales in the West"*; the explorer renders in the reply
@@ -157,6 +169,11 @@ with `MCP_API_KEY`, refused without it), then drives Chromium through:
 4. click the South region; the sidebar shows the selection Python received;
 5. click **Ask about this region**; the question appears and Python answers
    from the selection ("South brought in …").
+
+`evidence.json` is always written, including when a stage crashes (browser
+launch failure, navigation timeout, missing element: recorded as a failed
+`unexpected error` check with the traceback under `errors`) or the run is
+interrupted (`"completed": false`, never `"passed": true`).
 
 **Logging the browser in.** If the Shiny app requires login, `APP_API_KEY`
 adds `Authorization: Key …` to HTTP requests for the app's origin only (never
@@ -200,6 +217,9 @@ security issue: stop, do not relax the policy, record the observation.
 | `--check`: `reachable` FAIL with "DNS lookup failed" | Alias not in DNS | `getent hosts` | Administrator |
 | `--check`: "TLS certificate not accepted" | Alias not on the certificate | `curl -v` | Administrator |
 | `--check`: "HTTP 30x redirect to https://connect.example.com/…" | Connect/proxy canonicalises the host | `curl -sI` on the alias | Administrator: let the alias serve `/content/` as-is. Never point `SHINY_MCP_SANDBOX_URL` at the main hostname instead. |
+| Same, behind an AWS ALB (or similar load balancer) | A listener rule for the alias uses a **redirect** action | ALB listener rules for that host header | Administrator: a rule matching the alias's host header that **forwards** to the Connect target group. DNS and the certificate usually exist already if the redirect works over HTTPS. If the redirect exists for another reason, add a new hostname for the sandbox rather than repurposing it. |
+| `--check` / `check_deployment.py`: INCONCLUSIVE `frame-ancestors` | A framing policy uses a form the checker does not model (e.g. a path) | The recorded CSP headers | Confirm in the browser run (`explorer renders`); record the header |
+| `mcp requires auth` INCONCLUSIVE | The unauthenticated request timed out or got a non-auth error (5xx, 404, 421, other redirect) | `evidence.json` detail | Fix reachability first; this check needs a clear 401/403 or login redirect |
 | `--check`: "redirect to …/__login__…" or HTTP 401/403 "requires authentication" | Sandbox access is not "Anyone" | Content → Access | Set access to Anyone (temporary item) |
 | `--check`: HTTP 403 "not in its allowed_host_origins" | `SHINY_APP_ORIGIN` ≠ the app origin browsers use (scheme, host, port, trailing path) | Compare with the address bar | Fix the variable, restart the content |
 | `--check`: HTTP 404 | Wrong GUID/path, or content failed to start | Connect content logs | Redeploy; read logs |
@@ -238,7 +258,8 @@ The Connect recipe may be called **verified** only when all of these hold:
 
 1. `shiny-mcp-sandbox --check` passes against the alias URL;
 2. `scripts/check_deployment.py` exits `0` with `--mcp-url` and an MCP key
-   (all server, browser and isolation checks PASS);
+   (all server, browser and isolation checks PASS, none INCONCLUSIVE;
+   `evidence.json` has `"completed": true, "passed": true`);
 3. the MCP server refuses requests without credentials (`mcp requires auth`);
 4. the sandbox on the main hostname is refused (403 or `sandbox_config`);
 5. `make test-security` passes on the same revision;
@@ -248,6 +269,28 @@ The Connect recipe may be called **verified** only when all of these hold:
 
 Partial success is still worth recording: mark individual rows verified and
 leave the status note saying what is pending.
+
+## Next step: one application, two hostnames
+
+The baseline uses three content items. Browser isolation needs the sandbox on
+a **different origin (hostname)**, not in a different process: one ASGI
+application could serve both the Shiny app and the sandbox (e.g. a Starlette
+app mounting Shiny and `sandbox_app()`), reached through the main hostname for
+the app and the alias for the sandbox. This would halve the content to manage.
+
+Evaluate it only after the baseline passes, as a separate experiment:
+
+- serve both from one content item; point `SHINY_MCP_SANDBOX_URL` at the
+  sandbox path **on the alias** and set the sandbox's allowed origin to the
+  main hostname;
+- confirm that the alias serves the sandbox path without redirecting, and that
+  the app is **not** usable through the alias (or, if it is, that nothing
+  relies on it: a page loaded from the alias would share the sandbox's origin);
+- run the same `--check`, `check_deployment.py` and acceptance criteria.
+
+Record the result here. Until it passes, document only the three-content
+deployment as the recipe. Nothing in the repository implements the combined
+arrangement yet.
 
 ## 9. Cleanup
 

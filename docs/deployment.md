@@ -43,6 +43,13 @@ sandbox through a second hostname:
 `connect.example.com` is your Connect server; `connect-sandbox.example.com`
 is the alias. Vanity URLs work too; use whatever URL users' browsers see.
 
+Three items is the baseline, not a browser requirement: isolation needs the
+sandbox on its own hostname, not in its own process. Serving the Shiny app and
+the sandbox from one application, reached through the two hostnames, is a
+possible simplification that is neither implemented nor validated; the
+[runbook](posit-connect-validation.md#next-step-one-application-two-hostnames)
+records it as the next step.
+
 ### 0. Ask your administrator for the alias
 
 - a DNS name (e.g. `connect-sandbox.example.com`) pointing at the Connect
@@ -168,10 +175,12 @@ Two different questions, checked by two different tools:
 1. **Does the server answer correctly?** `shiny-mcp-sandbox --check
    SANDBOX_URL --host-origin APP_ORIGIN` (or `check_sandbox()`), from any
    machine. It reports DNS and TLS failures, redirects (e.g. the alias
-   redirecting to the main hostname or a login page), authentication
+   redirecting to the main hostname or a login page, which is what a load
+   balancer *redirect* rule does: it must *forward* instead), authentication
    (401/403), an app origin the sandbox does not allow, and headers that stop
-   framing (`X-Frame-Options`, an extra `frame-ancestors` policy added by a
-   proxy).
+   framing (`X-Frame-Options`, or any `frame-ancestors` policy, e.g. one added
+   by a proxy, whose sources do not match the app's origin). A source form it
+   does not model is reported `INCONCLUSIVE`, which does not count as a pass.
 2. **Does the browser embed it?** Only a browser can tell. The widget's
    `data-error-code` says where it stopped:
 

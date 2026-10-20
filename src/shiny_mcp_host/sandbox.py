@@ -53,6 +53,7 @@ from .policy import CSP_KEYS, _is_valid_csp_source
 
 __all__ = (
     "check_sandbox",
+    "frame_ancestors_verdict",
     "SandboxCheck",
     "probe_sandbox",
     "sandbox_app",
@@ -245,11 +246,107 @@ def probe_sandbox(host: str, port: int, timeout: float = 2.0) -> str | None:
 
 @dataclass(frozen=True)
 class SandboxCheck:
-    """One finding of :func:`check_sandbox`."""
+    """One finding of :func:`check_sandbox`.
+
+    ``inconclusive`` findings are not passes (``ok`` is ``False``): the check
+    could not decide, e.g. a header used a form it does not model.
+    """
 
     name: str
     ok: bool
     detail: str
+    inconclusive: bool = False
+
+    @property
+    def label(self) -> str:
+        return "PASS" if self.ok else "INCONCLUSIVE" if self.inconclusive else "FAIL"
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_HOST_SOURCE = re.compile(
+    r"^(?:(?P<scheme>[a-z][a-z0-9+.-]*)://)?"
+    r"(?P<host>\*|(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])"
+    r"(?::(?P<port>\d{1,5}|\*))?(?P<path>/\S*)?$"
+)
+
+
+def _source_matches(source: str, url_origin: str, self_origin: str) -> bool | None:
+    """Does one CSP ``frame-ancestors`` source expression match an origin?
+
+    Follows CSP Level 3 matching for the forms ``frame-ancestors`` allows
+    (``*``, ``'self'``, ``'none'``, scheme-sources and host-sources, including
+    ``*.`` host and ``*`` port wildcards and the http -> https upgrade).
+    Returns ``None`` for anything it does not model (e.g. a host-source with a
+    path), so callers report the result as inconclusive rather than guess.
+    """
+    s = source.strip().lower()
+    url = urlsplit(url_origin)
+    scheme, host = url.scheme, (url.hostname or "")
+    port = url.port or _DEFAULT_PORTS.get(scheme)
+    if s == "*":
+        return scheme in ("http", "https")
+    if s == "'self'":
+        return url_origin == self_origin
+    if s.startswith("'"):  # 'none' and keywords that never match in frame-ancestors
+        return False
+    if re.fullmatch(r"[a-z][a-z0-9+.-]*:", s):  # scheme-source, e.g. https:
+        return s[:-1] == scheme or (s == "http:" and scheme == "https")
+    m = _HOST_SOURCE.match(s)
+    if m is None or (m["path"] or "/") != "/":
+        return None
+    src_scheme = m["scheme"] or urlsplit(self_origin).scheme
+    if not (src_scheme == scheme or (src_scheme == "http" and scheme == "https")):
+        return False
+    src_host = m["host"].strip("[]")
+    if src_host == "*":
+        pass
+    elif src_host.startswith("*."):
+        if not host.endswith(src_host[1:]):
+            return False
+    elif src_host != host:
+        return False
+    if m["port"] == "*":
+        return True
+    if m["port"] is None:
+        return port == _DEFAULT_PORTS.get(scheme)
+    src_port = int(m["port"])
+    return src_port == port or (src_port == 80 and port == 443 and scheme == "https")
+
+
+def frame_ancestors_verdict(policies: Sequence[str], host_origin: str, self_origin: str) -> tuple[str, str]:
+    """Whether every CSP policy lets ``host_origin`` embed a page served from ``self_origin``.
+
+    ``policies`` are ``Content-Security-Policy`` header values (comma-joined
+    policies are split). Every policy is enforced, and within a policy only its
+    first ``frame-ancestors`` directive counts. Returns ``(verdict, detail)``
+    with verdict ``"allows"``, ``"blocks"``, ``"inconclusive"`` or ``"absent"``
+    (no policy restricts framing).
+    """
+    found: list[str] = []
+    verdicts: list[str] = []
+    for header in policies:
+        for policy in header.split(","):
+            directive = next(
+                (d.strip() for d in policy.split(";") if d.strip().lower().startswith("frame-ancestors")),
+                None,
+            )
+            if directive is None:
+                continue
+            sources = directive.split()[1:]
+            results = [_source_matches(src, host_origin, self_origin) for src in sources]
+            verdict = (
+                "allows"
+                if any(r is True for r in results)
+                else "inconclusive"
+                if None in results
+                else "blocks"
+            )
+            found.append(f"{directive!r}: {verdict}")
+            verdicts.append(verdict)
+    if not verdicts:
+        return "absent", "no frame-ancestors directive"
+    overall = "blocks" if "blocks" in verdicts else "inconclusive" if "inconclusive" in verdicts else "allows"
+    return overall, "; ".join(found)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -360,15 +457,21 @@ def check_sandbox(sandbox_url: str, host_origin: str, *, timeout: float = 10.0) 
     )
 
     policies = headers.get_all("Content-Security-Policy") or []
-    ancestors = [
-        d.strip() for p in policies for d in p.split(";") if d.strip().lower().startswith("frame-ancestors")
-    ]
-    ours = f"frame-ancestors {host_origin}"
-    add(
-        "frame-ancestors",
-        ours in ancestors and all(host_origin in a or "*" in a for a in ancestors),
-        f"CSP frame-ancestors directives: {ancestors or 'none'}; every one must allow {host_origin}"
-        + (" (an extra policy, e.g. from a proxy, blocks embedding)" if len(ancestors) > 1 else ""),
+    verdict, found = frame_ancestors_verdict(policies, host_origin, sandbox_origin)
+    explain = {
+        "allows": f"every policy lets {host_origin} embed the sandbox",
+        "blocks": f"a policy does not allow {host_origin}; browsers will refuse to embed the sandbox "
+        "(an extra policy, e.g. from a proxy, blocks even if the sandbox's own allows)",
+        "inconclusive": "a source expression this check does not model; confirm in a browser",
+        "absent": "the sandbox's own frame-ancestors header is missing (stripped by a proxy?)",
+    }[verdict]
+    checks.append(
+        SandboxCheck(
+            "frame-ancestors",
+            verdict == "allows",
+            f"{explain}. Directives: {found}",
+            inconclusive=verdict == "inconclusive",
+        )
     )
     add(
         "restrictive CSP",
@@ -482,13 +585,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             parser.error("--check needs --host-origin")
         checks = check_sandbox(args.check, args.host_origin)
         for c in checks:
-            print(f"{'PASS' if c.ok else 'FAIL'}  {c.name}: {c.detail}")
+            print(f"{c.label}  {c.name}: {c.detail}")
         ok = all(c.ok for c in checks)
         print(
             "\nServer-side checks passed. This does not prove browser embedding: confirm that a "
             'rendered widget reaches data-state="ready".'
             if ok
-            else "\nServer-side checks failed; see docs/posit-connect-validation.md#failure-diagnosis."
+            else "\nServer-side checks did not all pass (INCONCLUSIVE counts as not passed); see "
+            "docs/posit-connect-validation.md#7-failure-diagnosis."
         )
         raise SystemExit(0 if ok else 1)
     logging.basicConfig(level=logging.INFO)
