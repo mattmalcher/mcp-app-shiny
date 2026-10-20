@@ -140,3 +140,23 @@ def test_start_reuses_a_verified_sandbox():
         assert reused.url == f"http://localhost:{port}/sandbox.html"
     finally:
         first.stop()
+
+
+@pytest.mark.parametrize("mode", ["mounted", "root_path"])
+def test_works_under_a_path_prefix(mode):
+    """Hosts like Posit Connect serve content under /content/<guid>/."""
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    inner = sandbox_app(["https://connect.example.com"])
+    if mode == "mounted":
+        app, kw = Starlette(routes=[Mount("/content/abc", inner)]), {}
+    else:
+        app, kw = inner, {"root_path": "/content/abc"}
+    c = TestClient(app, base_url="https://connect-sandbox.example.com", **kw)
+    r = c.get("/content/abc/sandbox.html", params={"host": "https://connect.example.com", "nonce": NONCE})
+    assert r.status_code == 200
+    # The script is referenced relatively, so it resolves under the same prefix.
+    assert '<script src="sandbox.js">' in r.text
+    assert c.get("/content/abc/sandbox.js").status_code == 200
+    assert "frame-ancestors https://connect.example.com" in r.headers["content-security-policy"]

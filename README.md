@@ -42,6 +42,9 @@ Server Time" app instead, unmodified, as a compatibility smoke test.
 The package isn't on PyPI yet: install from a checkout with
 `pip install path/to/mcp-app-shiny` (or `make build` and install `dist/*.whl`).
 
+Planning to deploy? The sandbox needs **its own hostname**, separate from your
+Shiny app's. Check that first: see [Deploying](#deploying).
+
 ### In a chat, with your own agent loop
 
 When your agent (or LLM) has already called the tool, render the result you
@@ -185,21 +188,92 @@ message formats, supported MCP Apps features and versions, see
 
 ## Deploying
 
-The sandbox must be on a different origin than your app; a different path on
-the same host and port isn't enough.
+> **You need two hostnames.** The sandbox the apps run in must be served from a
+> different origin than your Shiny app. A different path on the same server is
+> not a different origin, so `https://connect.example.com/content/sandbox/`
+> next to `https://connect.example.com/content/my-app/` does **not** work. In
+> practice this means a second DNS name, such as
+> `https://mcp-sandbox.example.com`. It can point at the same server.
 
-- **Development:** `start_sandbox_server(port=8765)` runs it in a background
-  thread at `http://localhost:8765`. Open the app at `127.0.0.1`, so the two
-  also differ by hostname (browsers share cookies across ports). If the port is
-  taken by something else, it fails with a message saying so.
-- **Production:** serve `shiny_mcp_host.sandbox.sandbox_app(allowed_host_origins=["https://app.example.com"])`
-  with any ASGI server on a dedicated domain over HTTPS, and pass
-  `sandbox_url="https://sandbox.example-usercontent.com/sandbox.html"`. The
-  sandbox only lets the listed origins embed it.
+The MCP server and the Shiny app have no such requirement: they can live
+anywhere, including side by side on one server. Only the sandbox needs its
+own hostname, because it's what keeps third-party app HTML away from your
+Shiny page's DOM, cookies and inputs. Without it the host refuses to render
+rather than fall back to something unsafe.
 
-Transports: Streamable HTTP (`url=`) and stdio (`transport="stdio"`). For
-authenticated servers pass `headers=` or an `httpx2.Auth` as `auth=`; OAuth
-flows are not built in.
+### Local development
+
+`start_sandbox_server(port=8765)` runs the sandbox in a background thread at
+`http://localhost:8765`. Open the app at `127.0.0.1`, so the two also differ
+by hostname (browsers share cookies across ports). If the port is taken by
+something else, it fails with a message saying so. `make demo` does all of
+this for you. Don't use `start_sandbox_server` in production: it serves on the
+server's own `localhost`, which users' browsers can't reach.
+
+### Posit Connect
+
+Everything on one Connect server shares one origin, so a single Connect
+server can host the sandbox only if it is also reachable under a **second
+hostname**: a DNS alias for the same Connect server (for example
+`connect-sandbox.example.com` next to `connect.example.com`), with a TLS
+certificate covering it. Setting that up is a job for your Connect / IT
+administrator. Ask for:
+
+- a DNS name pointing at the Connect server, and
+- that name added to the server's TLS certificate (or a certificate for it on
+  the proxy in front of Connect).
+
+Then:
+
+1. **Deploy the sandbox** as a Python API. Create a directory with this
+   `app.py` (plus a `requirements.txt` listing `shiny-mcp-host`):
+
+   ```python
+   from shiny_mcp_host.sandbox import sandbox_app
+
+   # The origin your Shiny app is served from (as users' browsers see it).
+   app = sandbox_app(allowed_host_origins=["https://connect.example.com"])
+   ```
+
+   Deploy it as an ASGI API (for example `rsconnect deploy fastapi`, which
+   accepts any ASGI app) and set its access to **Anyone, no login required**.
+   It serves only a static proxy page and script, holds no data, and
+   logins on the main hostname don't carry over to the alias.
+2. **Deploy the MCP server** wherever you like, including as another Connect
+   API. Only the Shiny app's Python process talks to it, so the alias doesn't
+   matter here. If it requires a Connect login, pass an API key:
+   `host.add_server("sales", url=".../mcp", headers={"Authorization": "Key …"})`.
+   The key stays in Python.
+3. **Deploy the Shiny app** with the sandbox's URL **on the alias**, for
+   example as an environment variable on the content:
+   `SHINY_MCP_SANDBOX_URL=https://connect-sandbox.example.com/content/<sandbox-guid>/sandbox.html`.
+   `MCPHost` reads it when `sandbox_url` isn't passed.
+
+Not yet verified on a real Connect server:
+
+- that Connect serves content normally when reached through the alias (some
+  configurations redirect to the main address);
+- that Connect doesn't add its own `X-Frame-Options` or `frame-ancestors`
+  header to the sandbox's responses. If it does, browsers block the embed and
+  the widget reports *"Sandbox proxy … did not respond"*; your administrator
+  can allow embedding.
+
+If a second hostname isn't possible, see the opaque-origin alternative
+described in [docs/protocol-contract.md](docs/protocol-contract.md#without-a-second-hostname).
+It is not implemented yet.
+
+### Other platforms
+
+Serve `shiny_mcp_host.sandbox.sandbox_app(allowed_host_origins=["https://app.example.com"])`
+with any ASGI server on its own hostname over HTTPS, and pass
+`sandbox_url="https://sandbox.example.com/sandbox.html"`. An HTTPS app
+requires an HTTPS sandbox, and the sandbox only lets the listed origins embed it.
+
+### Transports
+
+Streamable HTTP (`url=`) and stdio (`transport="stdio"`). For authenticated
+servers pass `headers=` or an `httpx2.Auth` as `auth=`; OAuth flows are not
+built in.
 
 ## Limitations
 

@@ -193,3 +193,29 @@ Development: Shiny on `http://127.0.0.1:8000`, sandbox on
 `https://mcp-sandbox.example-usercontent.com`) over HTTPS, pass that
 `sandbox_url`, and set `allowed_host_origins` to your app's exact origin(s).
 An HTTPS app requires an HTTPS sandbox.
+
+### Without a second hostname
+
+Not implemented; recorded here as the fallback for deployments that can only
+use one hostname (e.g. a single Posit Connect server without a DNS alias).
+
+Instead of loading the outer proxy from a URL, the host would build it from
+inline HTML (`srcdoc`) in an iframe with `sandbox="allow-scripts allow-forms"`
+and no `allow-same-origin`. Browsers give such a frame an *opaque* origin,
+distinct from every other origin including the Shiny page's, so no sandbox
+server or second hostname is needed. Isolation from the Shiny page's DOM,
+cookies, storage and inputs is kept, Python still authorises every tool call,
+and the host still identifies the proxy by its window object.
+
+Costs, which is why it would be an explicit opt-in and not the default:
+
+- It departs from the spec, which requires the sandbox proxy to have
+  `allow-same-origin` (a real origin).
+- The CSP is delivered by a `<meta>` tag instead of an HTTP header (still
+  enforced and inherited by the View), and `frame-ancestors` is unavailable.
+- Views that need a real origin (`localStorage`, cookies) cannot work, and
+  `view_same_origin` cannot be offered.
+- Browser process isolation of sandboxed frames varies by browser; a separate
+  hostname is a separate site and reliably gets its own process.
+
+The malicious-View test suite would have to pass unchanged in this mode.
