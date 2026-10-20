@@ -91,25 +91,28 @@ it("randomToken / clampHeight", () => {
 });
 
 describe("withMetaCsp", () => {
-  const meta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'">`;
-  it("goes first in <head>", () => {
-    expect(withMetaCsp(`<!doctype html><html><head lang="en"><script>x</script></head></html>`, "default-src 'none'")).toBe(
-      `<!doctype html><html><head lang="en">${meta}<script>x</script></head></html>`,
-    );
-  });
-  it("goes after <html> or the doctype when there is no <head>, never before the doctype", () => {
-    expect(withMetaCsp(`<!DOCTYPE html><html lang="en"><body>x`, "default-src 'none'")).toBe(
-      `<!DOCTYPE html><html lang="en">${meta}<body>x`,
-    );
-    expect(withMetaCsp(`<!doctype html><script>x</script>`, "default-src 'none'")).toBe(
-      `<!doctype html>${meta}<script>x</script>`,
-    );
-    expect(withMetaCsp(`<p>x</p>`, "default-src 'none'")).toBe(`${meta}<p>x</p>`);
-  });
-  it("does not match <header>", () => {
-    expect(withMetaCsp(`<header>h</header>`, "a")).toBe(`<meta http-equiv="Content-Security-Policy" content="a"><header>h</header>`);
+  const start = `<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'">`;
+  it("puts the policy before any View content, without searching the View's HTML", () => {
+    for (const html of [
+      `<!doctype html><html><head><script>x</script></head></html>`,
+      `<!doctype html><!-- example: <head> --><script>fetch("x")</script><head></head>`,
+      `<script>fetch("x")</script><head></head>`,
+      `<p>x</p>`,
+      "",
+    ]) {
+      expect(withMetaCsp(html, "default-src 'none'")).toBe(start + html);
+    }
   });
   it("escapes the attribute value", () => {
     expect(withMetaCsp("", `a "b" & <c>`)).toContain(`content="a &quot;b&quot; &amp; &lt;c>"`);
+  });
+  it("is the first element in the parsed head, ahead of the View's own head content", () => {
+    const html = `<!DOCTYPE html><html lang="en"><head><title>t</title><script>1</script></head><body><p>x</p></body></html>`;
+    const doc = new DOMParser().parseFromString(withMetaCsp(html, "default-src 'none'"), "text/html");
+    expect(doc.compatMode).toBe("CSS1Compat");
+    expect(doc.documentElement.lang).toBe("en");
+    expect([...doc.head.children].map((e) => e.tagName)).toEqual(["META", "TITLE", "SCRIPT"]);
+    expect(doc.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
+    expect(doc.body.innerHTML).toBe("<p>x</p>");
   });
 });

@@ -14,6 +14,7 @@ from playwright.sync_api import expect
 
 from tests.e2e.helpers import cmd, outer_frame, wait_ready, widget
 from tests.e2e.test_security import ATTACKS, FIRE_AND_FORGET, fixture_stats
+from tests.fixtures.fixture_server import CSP_PROBE_URL
 
 pytestmark = [pytest.mark.e2e, pytest.mark.security]
 
@@ -56,6 +57,22 @@ def test_trusted_view_csp_is_enforced_by_meta_tag(trusted_fixture_app, page_with
     srcdoc = widget(page, "w_a").locator("iframe").get_attribute("srcdoc") or ""
     assert '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'' in srcdoc
     assert "frame-ancestors" not in srcdoc
+    errors.assert_none()
+
+
+@pytest.mark.parametrize("tool", ["csp-probe-comment", "csp-probe-script"])
+def test_trusted_csp_applies_to_scripts_before_the_views_head(trusted_fixture_app, page_with_errors, tool):
+    """The policy is the host's own document start, not found by searching the View's HTML."""
+    page, errors = page_with_errors
+    leaks = []
+    page.on("request", lambda r: leaks.append(r.url) if r.url.startswith(CSP_PROBE_URL) else None)
+    page.goto(trusted_fixture_app.url)
+    cmd(page, action="render", tool=tool, target="w_a")
+    wait_ready(page, "w_a")
+    v = trusted_view(page, "w_a")
+    expect(v.locator("html")).to_have_attribute("data-probe", "blocked:connect-src")
+    expect(v.locator("#count")).to_have_text("1")
+    assert leaks == []
     errors.assert_none()
 
 

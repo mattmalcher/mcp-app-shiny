@@ -91,20 +91,21 @@ export function checkSandboxUrl(sandboxUrl: unknown, pageOrigin: string, viewSam
 }
 
 /**
- * Insert a `<meta>` Content-Security-Policy as the first element the View
- * document parses, so it applies before any of the View's own scripts.
- * Used in trusted mode, where there is no sandbox server to send the header.
+ * Prefix the View's HTML with a document start the host controls: a doctype
+ * and a `<meta>` Content-Security-Policy, which the parser places in the
+ * head before it reads a single byte of the View. Used in trusted mode,
+ * where there is no sandbox server to send the policy as a header.
+ *
+ * The View's HTML is never searched (a `<head>` inside a comment or a
+ * script, or a script before it, would defeat that). Its own doctype and
+ * `<html>`/`<head>` tags arrive after the head has started, where HTML
+ * parsing ignores them (attributes on `<html>` are merged), so the View's
+ * head content still ends up in the head. A View without a doctype renders
+ * in standards mode rather than quirks mode.
  */
 export function withMetaCsp(html: string, policy: string): string {
   const escaped = policy.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${escaped}">`;
-  // After <head>, else <html>, else the doctype (prepending before a doctype
-  // would force quirks mode); the parser puts the meta in the implied head.
-  for (const re of [/<head(\s[^>]*)?>/i, /<html(\s[^>]*)?>/i, /<!doctype[^>]*>/i]) {
-    const m = re.exec(html);
-    if (m) return html.slice(0, m.index + m[0].length) + meta + html.slice(m.index + m[0].length);
-  }
-  return meta + html;
+  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${escaped}">${html}`;
 }
 
 /** Build the sandbox page URL for one mount. */

@@ -32,6 +32,10 @@ BROKEN_MIME_URI = "ui://fixture/broken-mime.html"
 EMPTY_URI = "ui://fixture/empty.html"
 HUGE_URI = "ui://fixture/huge.html"
 BLOB_URI = "ui://fixture/blob.html"
+PROBE_COMMENT_URI = "ui://fixture/csp-probe-comment.html"
+PROBE_SCRIPT_URI = "ui://fixture/csp-probe-script.html"
+#: Never reachable; a request to it means the View's CSP did not apply.
+CSP_PROBE_URL = "http://127.0.0.1:9/csp-leak"
 
 COUNTERS: dict[str, int] = {"secret-admin": 0, "model-only": 0, "increment": 0, "slow": 0}
 
@@ -61,6 +65,27 @@ COUNTER_HTML = page(
     "<button id='open-bad-link'>Open javascript link</button>",
 )
 EVIL_HTML = page("evil", "<h1>Evil view</h1><ul id='attacks'></ul>")
+
+
+def csp_probe(case: str, prefix: str) -> str:
+    """The counter View with a script before its <head> that tries the network.
+
+    The script records CSP violations on <html data-probe>; trusted mode must
+    still block the request (tests/e2e/test_trusted_mode.py).
+    """
+    script = (
+        "<script>"
+        "addEventListener('securitypolicyviolation', (e) => {"
+        " if (e.effectiveDirective === 'connect-src')"
+        " document.documentElement.setAttribute('data-probe', 'blocked:connect-src'); });"
+        f"fetch({CSP_PROBE_URL + '?' + case!r}).catch(() => {{}});"
+        "</script>"
+    )
+    return prefix + script + COUNTER_HTML.removeprefix("<!doctype html>\n")
+
+
+PROBE_COMMENT_HTML = csp_probe("comment", "<!doctype html><!-- example: <head> -->")
+PROBE_SCRIPT_HTML = csp_probe("script", "")
 
 apps = Apps()
 
@@ -93,6 +118,20 @@ def csp_demo() -> str:
     return "csp"
 
 
+@apps.tool(
+    resource_uri=PROBE_COMMENT_URI, name="csp-probe-comment", description="CSP probe: <head> in a comment."
+)
+def csp_probe_comment() -> CallToolResult:
+    return counter(1)
+
+
+@apps.tool(
+    resource_uri=PROBE_SCRIPT_URI, name="csp-probe-script", description="CSP probe: script before <head>."
+)
+def csp_probe_script() -> CallToolResult:
+    return counter(1)
+
+
 @apps.tool(resource_uri=BLOB_URI, name="blob-counter", description="Counter served as a base64 blob.")
 def blob_counter() -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text="count=7")], structured_content={"count": 7})
@@ -110,6 +149,8 @@ apps.add_html_resource(
     ),
 )
 apps.add_html_resource(BLOB_URI, COUNTER_HTML, name="blob")
+apps.add_html_resource(PROBE_COMMENT_URI, PROBE_COMMENT_HTML, name="csp-probe-comment")
+apps.add_html_resource(PROBE_SCRIPT_URI, PROBE_SCRIPT_HTML, name="csp-probe-script")
 
 # The extension is consumed at construction, so register Apps tools first.
 mcp = MCPServer("shiny-mcp-host fixture", version="1.0.0", extensions=[apps])

@@ -156,8 +156,11 @@ There is no sandbox server and no proxy. Each View is loaded straight into
 one iframe on the Shiny page, from `srcdoc`, with
 `sandbox="allow-scripts allow-forms"` (no `allow-same-origin`), and the
 `AppBridge` talks to it directly. Python builds the same CSP as the sandbox
-server and the browser puts it in a `<meta>` tag at the top of the View's
-HTML.
+server, and the browser starts the iframe's document with its own
+`<!doctype html><meta http-equiv="Content-Security-Policy" …>` before the
+View's HTML. The View's HTML is never searched for a `<head>`, so comments or
+scripts ahead of it can't push the policy aside. A View without a doctype
+renders in standards mode.
 
 What still holds:
 
@@ -177,8 +180,9 @@ up:
 - **Not spec-compliant.** The MCP Apps spec requires the sandbox proxy on its
   own origin; this mode has no proxy at all.
 - **CSP from `<meta>`, not a header.** `frame-ancestors` can't be expressed,
-  and a mistake in the HTML handling (e.g. the meta landing after a script)
-  would leave that script unrestricted.
+  and the policy depends on the host's HTML prefix being parsed first rather
+  than on the browser applying a header (tested with scripts and comments
+  ahead of the View's `<head>`).
 - **Messages to the View are posted with target origin `"*"`**, because an
   opaque origin cannot be named. If the View navigates its own frame
   elsewhere, the new page receives what the host sends next.
