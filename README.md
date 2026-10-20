@@ -194,6 +194,12 @@ message formats, supported MCP Apps features and versions, see
 > next to `https://connect.example.com/content/my-app/` does **not** work. In
 > practice this means a second DNS name, such as
 > `https://mcp-sandbox.example.com`. It can point at the same server.
+>
+> It's a second **name**, not a second server, and a second piece of content
+> alone isn't enough: browsers draw their security boundary at the origin
+> (scheme + hostname + port), and paths like `/content/<guid>/` aren't part of
+> it. Two content items on one hostname can read each other's pages and the
+> user's login cookie, which is what the sandbox exists to prevent.
 
 The MCP server and the Shiny app have no such requirement: they can live
 anywhere, including side by side on one server. Only the sandbox needs its
@@ -214,7 +220,16 @@ server's own `localhost`, which users' browsers can't reach.
 
 Everything on one Connect server shares one origin, so a single Connect
 server can host the sandbox only if it is also reachable under a **second
-hostname**: a DNS alias for the same Connect server (for example
+hostname**. The setup is three content items on the same server, with users'
+browsers reaching the sandbox through the second name:
+
+| Content | Reached at |
+|---|---|
+| Shiny app | `https://connect.example.com/content/<app-guid>/` |
+| Sandbox | `https://connect-sandbox.example.com/content/<sandbox-guid>/sandbox.html` |
+| MCP server | anywhere; only the Shiny app's Python process talks to it |
+
+The second hostname is a DNS alias for the same Connect server (for example
 `connect-sandbox.example.com` next to `connect.example.com`), with a TLS
 certificate covering it. Setting that up is a job for your Connect / IT
 administrator. Ask for:
