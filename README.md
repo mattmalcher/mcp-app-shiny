@@ -1,24 +1,141 @@
 # shiny-mcp-host
 
-Render standards-compliant [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
-(interactive UIs attached to MCP tools) inside **Python Shiny** apps — in a
-normal page or inside a `ui.Chat` assistant message — without R and without
-writing JavaScript.
+**Interactive MCP tools, inside Shiny.**
 
-- Python owns every MCP connection (Streamable HTTP or stdio); tokens and
-  server URLs never reach the browser.
-- Each View runs in the official `AppBridge` lifecycle, inside a double-iframe
-  sandbox on a **distinct origin**, with spec-default CSP.
-- Tool calls from a View go browser → Shiny → Python → MCP, and are authorised
-  in Python.
-- Model-context updates and `ui/message` requests from Views reach Python
-  callbacks, per widget.
+Render [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) in Python
+Shiny pages and chat messages. Write Python; the host handles connections,
+rendering, and sandboxing.
 
-Implements MCP Apps spec `2026-01-26` with `@modelcontextprotocol/ext-apps` 2.0.3.
-See [docs/protocol-contract.md](docs/protocol-contract.md) for exactly what is
-supported.
+![A sales explorer MCP App inside a Shiny chat: the user filters and selects a region, and Python answers using that selection](docs/images/sales-explorer.gif)
 
-## Architecture
+## Try it
+
+You need [uv](https://docs.astral.sh/uv/) and Node 20+ (Node builds the browser bundle).
+
+```bash
+git clone https://github.com/mattmalcher/mcp-app-shiny.git
+cd mcp-app-shiny
+make setup   # Python env from uv.lock, npm ci, build the browser bundle
+make demo
+```
+
+`make demo` starts three things and tells you where they are:
+
+| | | |
+|---|---|---|
+| MCP server | `http://127.0.0.1:3001/mcp` | the sales explorer example (`examples/sales_explorer/server.py`) |
+| Sandbox | `http://localhost:8765` | serves the iframe the app's HTML runs in, on its own origin |
+| Shiny app | **`http://127.0.0.1:8000`** | open this |
+
+Then:
+
+1. Ask *"Explore Q3 sales in the West"*. The explorer appears in the reply.
+2. Change the product filter. The explorer queries the MCP server through Python.
+3. Click a region. The sidebar shows the selection Python received.
+4. Click **Ask about this region**. The question lands in the chat and Python answers from the selection.
+
+Ctrl+C stops everything. `make demo-clock` runs the official ext-apps "Get
+Server Time" app instead, unmodified, as a compatibility smoke test.
+
+## Use it in your app
+
+The package isn't on PyPI yet: install from a checkout with
+`pip install path/to/mcp-app-shiny` (or `make build` and install `dist/*.whl`).
+
+### In a chat, with your own agent loop
+
+When your agent (or LLM) has already called the tool, render the result you
+have. The tool is not called again, so side effects never run twice.
+
+```python
+from shiny import App, ui
+from shiny_mcp_host import MCPHost
+from shiny_mcp_host.sandbox import start_sandbox_server
+
+sandbox = start_sandbox_server(port=8765)  # dev only; see "Deploying"
+
+app_ui = ui.page_fillable(ui.chat_ui("chat"))
+
+def server(input, output, session):
+    chat = ui.Chat("chat", history=False)
+    host = MCPHost(session, sandbox_url=sandbox.url)
+    host.add_server("sales", url="http://127.0.0.1:3001/mcp")
+
+    @chat.on_user_submit
+    async def _(text: str):
+        args = {"quarter": "Q3"}                                   # your LLM picks these
+        result = await host.call_tool("sales", "explore_sales", args)
+        await host.render_in_chat(chat, "sales", "explore_sales", args, result=result)
+
+app = App(app_ui, server)
+```
+
+Outside chat, put `mcp_widget("sales")` in your UI and call
+`await host.render_result("sales", "explore_sales", args, result, target="sales")`.
+If nothing else calls the tool, `await host.call_and_render(server, tool, args, target=...)`
+does both steps.
+
+### Getting data back from the app
+
+```python
+@host.on_model_context            # the app shares state (e.g. a selection)
+def _(event):
+    print(event.widget_id, event.structured_content)
+
+@host.on_message                  # the app asks to add a message to the conversation
+def _(event):
+    print(event.text)             # return False to reject it
+
+host.model_context("sales")       # reactive: the latest context from one widget
+```
+
+The full example is [`examples/sales_explorer/`](examples/sales_explorer/).
+
+## API
+
+| | |
+|---|---|
+| `mcp_widget(id, *, host="mcp", height=360)` | Mount point for an app; works in static UI, dynamic UI and chat messages |
+| `MCPHost(session=None, *, id="mcp", sandbox_url=None, policy=None, theme="light")` | One per session; `sandbox_url` falls back to `$SHINY_MCP_SANDBOX_URL` |
+| `host.add_server(name, *, url=None, transport="streamable_http", command=None, args=(), env=None, headers=None, auth=None)` | Register a server (connects lazily); `transport="stdio"` launches a subprocess |
+| `await host.list_tools(server)` | Tools, with `has_ui`, `ui_resource_uri` and `visibility` |
+| `await host.call_tool(server, tool, arguments)` | Plain tool call, e.g. from your agent loop |
+| `await host.render_result(server, tool, arguments, result, *, target, error=None)` | Render the app for a call that already happened |
+| `await host.call_and_render(server, tool, arguments, *, target)` | Call the tool, then render it |
+| `await host.render_in_chat(chat, server, tool, arguments, *, result=None, text=None)` | Append an assistant message with a new widget and render into it |
+| `host.widget(id=None, *, height=360)` | A widget tag bound to this host (auto id) |
+| `host.on_model_context(fn)`, `host.model_context(target=None)` | Context shared by apps, per widget |
+| `host.on_message(fn)` | Messages apps ask to add to the conversation |
+| `host.widget_status(target)` | Reactive lifecycle status |
+| `await host.remove_widget(target)`, `await host.close()` | Teardown; `close()` also runs when the session ends |
+
+Render errors (server down, bad resource, timeout) appear in the widget and in
+`RenderResult.error`; they are not raised. If you render into a widget again,
+the newest render wins, even when an older call finishes later.
+
+## Security model
+
+An MCP App is HTML from a third-party server, so it is treated as untrusted:
+
+- **It runs in a sandbox on another origin.** The app's HTML is loaded two
+  iframes deep, behind a proxy served from a separate origin, with the spec's
+  restrictive Content Security Policy (no network access unless approved). It
+  can't read the Shiny page, its cookies, or Shiny inputs. Without a separate
+  origin configured, the host refuses to render rather than fall back to
+  something unsafe.
+- **Python decides what the app may do.** Every tool call from the app goes
+  through Python and `HostPolicy`. By default an app may call only its own tool
+  and tools its server marks as callable by apps (`visibility: ["app"]`), only on
+  its own server. Rejected calls never reach the MCP server.
+- **Credentials stay in Python.** Server URLs, headers and tokens never reach
+  the browser.
+
+`HostPolicy` options: `app_tools` (explicit allowlist), `allowed_csp_domains`,
+`allowed_permissions` (camera, microphone, geolocation, clipboard),
+`allow_open_links`, size limits and `request_timeout`. The browser test suite
+includes a deliberately malicious app; see [`tests/e2e/test_security.py`](tests/e2e/test_security.py).
+
+## How it works
 
 ```mermaid
 flowchart TB
@@ -60,162 +177,59 @@ flowchart TB
     sbsrv -.->|serves| proxy
 ```
 
-Python owns the MCP connections; the browser only relays validated View requests
-to it. Each View runs two iframes deep, on origins distinct from the Shiny page.
-See [docs/protocol-contract.md](docs/protocol-contract.md) for the message flow.
+Python owns the MCP connections; the browser only relays validated requests
+from the app to it. The app runs on an origin separate from the Shiny page. For
+message formats, supported MCP Apps features and versions, see
+[docs/protocol-contract.md](docs/protocol-contract.md). Implements MCP Apps spec
+`2026-01-26` using the official `@modelcontextprotocol/ext-apps` bridge (2.0.3).
 
-## Install
+## Deploying
 
-```bash
-pip install shiny-mcp-host          # once published; or: pip install dist/*.whl
-```
+The sandbox must be on a different origin than your app; a different path on
+the same host and port isn't enough.
 
-The wheel ships the compiled browser bundle; Node is only needed to build from
-source.
-
-## Quickstart
-
-```python
-from shiny import App, reactive, ui
-from shiny_mcp_host import MCPHost, mcp_widget
-from shiny_mcp_host.sandbox import start_sandbox_server
-
-sandbox = start_sandbox_server(port=8765)   # distinct origin: http://localhost:8765
-
-app_ui = ui.page_fluid(
-    ui.h2("MCP Apps in Python Shiny"),
-    mcp_widget("demo_widget", height=420),
-)
-
-def server(input, output, session):
-    host = MCPHost(session, sandbox_url=sandbox.url)
-    host.add_server("demo", url="http://127.0.0.1:3001/mcp")
-
-    @reactive.effect
-    async def _():
-        await host.call_and_render("demo", "get-time", {}, target="demo_widget")
-
-app = App(app_ui, server)
-```
-
-Run it with `shiny run --host 127.0.0.1 app.py` and open
-`http://127.0.0.1:8000` (see [Sandbox origin setup](#sandbox-origin-setup)).
-
-### In `ui.Chat`
-
-```python
-chat = ui.Chat(id="chat", history=False)
-host = MCPHost(session, sandbox_url=sandbox.url)
-host.add_server("demo", url="http://127.0.0.1:3001/mcp")
-
-@chat.on_user_submit
-async def _(user_input: str):
-    # Appends an assistant message containing a widget, then renders into it.
-    await host.render_in_chat(chat, "demo", "get-time", {}, text="Here is the server time:")
-```
-
-Full, runnable versions: [examples/standalone/app.py](examples/standalone/app.py)
-and [examples/chat/app.py](examples/chat/app.py).
-
-## API
-
-| | |
-|---|---|
-| `mcp_widget(id, *, host="mcp", height=360)` | UI mount point (`<shiny-mcp-widget>`); works in static UI, dynamic UI and chat messages |
-| `MCPHost(session=None, *, id="mcp", sandbox_url=None, policy=None, theme="light")` | one per session; `sandbox_url` falls back to `$SHINY_MCP_SANDBOX_URL` |
-| `host.add_server(name, *, url=None, transport="streamable_http", command=None, args=(), env=None, headers=None, auth=None)` | register a server (lazy connect); `transport="stdio"` launches a subprocess |
-| `await host.list_tools(server)` | `ToolInfo` list with `ui_resource_uri`, `visibility`, `has_ui` |
-| `await host.call_tool(server, tool, arguments)` | plain call, no rendering (for your own LLM loop) |
-| `await host.call_and_render(server, tool, arguments, *, target)` | call + render into a widget; returns `RenderResult` (errors are shown in the widget and returned, not raised) |
-| `host.widget(id=None, *, height=360)` | a widget tag bound to this host (auto id) |
-| `await host.render_in_chat(chat, server, tool, arguments, *, text=None)` | append an assistant message with a widget and render into it |
-| `host.on_model_context(fn)` / `host.model_context(target=None)` | callback / reactive read of `ui/update-model-context`, per widget |
-| `host.on_message(fn)` | callback for `ui/message`; return `False` to reject |
-| `host.widget_status(target)` | reactive lifecycle status |
-| `await host.remove_widget(target)`, `await host.close()` | teardown (close also runs automatically when the session ends) |
-
-## Sandbox origin setup
-
-The MCP Apps spec requires the sandbox proxy to be on a different origin than
-the host page; a different URL path on the same host and port is **not** an
-origin boundary. `MCPHost` refuses to run without one — there is no unsafe
-fallback.
-
-- **Development:** `start_sandbox_server(port=8765)` runs the proxy in a
-  background thread at `http://localhost:8765`. Open your app at
-  `http://127.0.0.1:<port>` so the two also differ in hostname (cookies are
-  shared across ports of the same hostname). Or run it separately:
-  `shiny-mcp-sandbox --port 8765` (alias for `python -m shiny_mcp_host.sandbox`).
+- **Development:** `start_sandbox_server(port=8765)` runs it in a background
+  thread at `http://localhost:8765`. Open the app at `127.0.0.1`, so the two
+  also differ by hostname (browsers share cookies across ports). If the port is
+  taken by something else, it fails with a message saying so.
 - **Production:** serve `shiny_mcp_host.sandbox.sandbox_app(allowed_host_origins=["https://app.example.com"])`
   with any ASGI server on a dedicated domain over HTTPS, and pass
-  `sandbox_url="https://sandbox.example-usercontent.com/sandbox.html"`.
-  The server only embeds into the listed host origins (`frame-ancestors`).
+  `sandbox_url="https://sandbox.example-usercontent.com/sandbox.html"`. The
+  sandbox only lets the listed origins embed it.
 
-## Permission model
-
-`HostPolicy` is enforced in Python:
-
-- **Tools from Views:** same server only; the tool must exist and its
-  `_meta.ui.visibility` must include `"app"` (spec). On top of that, by default
-  a View may call only the tool that produced it and tools explicitly marked
-  `visibility: ["app", …]`. Pass `app_tools={"server": {"tool", …}}` for an
-  explicit allowlist. Rejected calls never reach the MCP server.
-- **CSP:** the sandbox uses the spec's restrictive default. Domains a resource
-  declares in `_meta.ui.csp` are dropped unless listed in
-  `allowed_csp_domains` (or `trust_declared_csp=True`); malformed entries and
-  non-http(s)/ws(s) schemes are always rejected.
-- **Permissions** (camera, microphone, geolocation, clipboardWrite): none by
-  default; grant with `allowed_permissions`.
-- **Links:** `ui/open-link` accepts only absolute http(s) URLs (`allow_open_links`).
-- **Limits:** `max_resource_bytes` (5 MB), `max_tool_payload_bytes` (256 KB),
-  `max_pending_per_widget` (16), `request_timeout` (30 s).
-- `view_same_origin=False` (default) runs the View in an opaque origin.
-
-## Transports
-
-Streamable HTTP (`url=...`) and stdio (`transport="stdio", command=..., args=[...]`).
-For authenticated remote servers pass `headers={"Authorization": ...}` or an
-`httpx2.Auth` via `auth=`; full OAuth flows are not implemented.
+Transports: Streamable HTTP (`url=`) and stdio (`transport="stdio"`). For
+authenticated servers pass `headers=` or an `httpx2.Auth` as `auth=`; OAuth
+flows are not built in.
 
 ## Limitations
 
-- No LLM/agent loop — you decide which tool to call (or wire your own LLM to
-  `call_tool` / `render_in_chat`).
-- Inline display mode only; no fullscreen, partial tool-input streaming,
-  file download, sampling, or theme changes after mount.
-- Conversation history / bookmark restoration of widgets is not supported
-  (use `ui.Chat(history=False)`); widgets live as long as the Shiny session.
-- Tested on Chromium only (Firefox is supported by the harness via
-  `E2E_BROWSER=firefox` but was not available in the development environment).
-- Not yet published to PyPI.
+- No LLM included: you choose which tool to call, or connect your own model.
+- Inline display only: no fullscreen, streamed partial tool input, file
+  download, sampling, or theme changes after an app loads.
+- Widgets last as long as the Shiny session; chat history restore isn't
+  supported (use `ui.Chat(history=False)`).
+- Tested on Chromium. Firefox is wired into the test harness (`E2E_BROWSER=firefox`) but untested.
 
 ## Debugging
 
-- Browser console: the adapter logs with a `[shiny-mcp-host]` prefix; the
-  sandbox with `[shiny-mcp sandbox]`.
-- Widget state is exposed as attributes on the element:
-  `data-state` (`mounting`, `loading`, `ready`, `error`, `fallback`,
-  `disconnected`), `data-error-code`, `data-render-id`, `data-mount-id`.
-- Python logs to the `shiny_mcp_host` logger (rendered resource, applied CSP,
-  rejected requests, View logs).
+- Browser console: `[shiny-mcp-host]` (adapter) and `[shiny-mcp sandbox]`.
+- Widget state is on the element: `data-state` (`mounting`, `loading`,
+  `ready`, `error`, `fallback`, `disconnected`) and `data-error-code`.
+- Python logs to the `shiny_mcp_host` logger.
 
 ## Development
 
-Requires `uv`, Node 20+ and npm.
-
 ```bash
-make setup             # uv sync --frozen, npm ci, build browser assets
+make setup             # uv sync --frozen, npm ci, build the browser bundle
 make build             # browser bundle + wheel/sdist into dist/
+make test              # everything below, plus lint
 make test-unit         # pytest unit + Vitest
-make test-integration  # fixture + official demo MCP servers, Python host
-make test-e2e          # servers + Shiny apps + Playwright (Chromium)
-make test-security     # every test marked `security`, all layers
-make test-compat       # clones + builds upstream basic-host, same demo there (A15)
-make test-dist         # installs the wheel into a clean venv and checks assets
-make test              # all of the above + lint
-make demo              # official demo server + chat example on http://127.0.0.1:8000
+make test-integration  # Python host against real MCP servers
+make test-e2e          # Shiny apps in Playwright (Chromium)
+make test-security     # every test marked `security`
+make test-compat       # same official app in the upstream ext-apps basic-host
+make test-dist         # install the wheel in a clean venv and check it
 ```
 
-Layout: `src/shiny_mcp_host/` (Python package; `static/` holds the compiled
-bundle), `frontend/` (TypeScript sources, Vitest), `examples/`, `tests/`
-(`unit`, `integration`, `e2e`, `fixtures`), `docs/protocol-contract.md`.
+Layout: `src/shiny_mcp_host/` (package; `static/` is the compiled bundle),
+`frontend/` (TypeScript), `examples/`, `tests/`, `docs/`.

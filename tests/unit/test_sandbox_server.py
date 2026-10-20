@@ -89,3 +89,54 @@ def test_only_sandbox_files_served(client):
 
 def test_build_csp_header_base_uri_default():
     assert "base-uri 'self'" in build_csp_header(None, "http://127.0.0.1:8000")
+
+
+def test_healthz_identifies_the_service(client):
+    r = client.get("/healthz")
+    assert r.json()["service"] == "shiny-mcp-host-sandbox"
+
+
+def test_start_refuses_a_port_held_by_something_else():
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from shiny_mcp_host.sandbox import start_sandbox_server
+
+    class Other(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"hello, I am not a sandbox")
+
+        def log_message(self, *a):
+            pass
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = HTTPServer(("127.0.0.1", port), Other)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(RuntimeError, match="not by a shiny-mcp-host sandbox"):
+            start_sandbox_server(port=port)
+    finally:
+        srv.shutdown()
+
+
+def test_start_reuses_a_verified_sandbox():
+    import socket
+
+    from shiny_mcp_host import sandbox as sb
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    first = sb.start_sandbox_server(port=port)
+    try:
+        assert sb.probe_sandbox("127.0.0.1", port) is not None
+        sb._RUNNING.pop(port)  # simulate another process owning it
+        reused = sb.start_sandbox_server(port=port)
+        assert reused.url == f"http://localhost:{port}/sandbox.html"
+    finally:
+        first.stop()

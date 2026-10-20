@@ -27,6 +27,7 @@ import re
 import socket
 import threading
 import time
+import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,16 +35,26 @@ from typing import Any
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, PlainTextResponse, Response
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
+from ._version import __version__
 from .policy import CSP_KEYS, _is_valid_csp_source
 
-__all__ = ("sandbox_app", "build_csp_header", "start_sandbox_server", "SandboxServer", "DEFAULT_HOST_ORIGINS")
+__all__ = (
+    "probe_sandbox",
+    "sandbox_app",
+    "build_csp_header",
+    "start_sandbox_server",
+    "SandboxServer",
+    "DEFAULT_HOST_ORIGINS",
+)
 
 logger = logging.getLogger("shiny_mcp_host.sandbox")
 
 STATIC_DIR = Path(__file__).parent / "static"
+#: Identifies this service on ``/healthz`` so a busy port can be told apart.
+SERVICE_NAME = "shiny-mcp-host-sandbox"
 
 #: Host (Shiny app) origins allowed to embed the sandbox by default: loopback dev servers.
 DEFAULT_HOST_ORIGINS: tuple[str, ...] = ("http://127.0.0.1:*", "http://localhost:*")
@@ -156,6 +167,9 @@ def sandbox_app(allowed_host_origins: Sequence[str] = DEFAULT_HOST_ORIGINS) -> S
             headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
         )
 
+    async def healthz(request: Request) -> Response:
+        return JSONResponse({"service": SERVICE_NAME, "version": __version__})
+
     async def not_found(request: Request) -> Response:
         return PlainTextResponse("Not found", status_code=404)
 
@@ -163,6 +177,7 @@ def sandbox_app(allowed_host_origins: Sequence[str] = DEFAULT_HOST_ORIGINS) -> S
         routes=[
             Route("/sandbox.html", sandbox_html),
             Route("/sandbox.js", sandbox_js),
+            Route("/healthz", healthz),
             Route("/{path:path}", not_found),
         ]
     )
@@ -204,6 +219,18 @@ def _port_open(host: str, port: int) -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+def probe_sandbox(host: str, port: int, timeout: float = 2.0) -> str | None:
+    """Return the version of the shiny-mcp-host sandbox on ``host:port``, or ``None``."""
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as r:
+            data = json.loads(r.read(4096))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("service") == SERVICE_NAME:
+        return str(data.get("version", "?"))
+    return None
+
+
 def start_sandbox_server(
     port: int = 8765,
     *,
@@ -225,7 +252,16 @@ def start_sandbox_server(
         if existing is not None:
             return existing
         if _port_open(host, port):
-            # Another process (e.g. the parent of a --reload worker) is serving it.
+            # Reuse a sandbox another process serves (e.g. the parent of a
+            # --reload worker), but only after confirming that is what it is.
+            version = probe_sandbox(host, port)
+            if version is None:
+                raise RuntimeError(
+                    f"Port {port} on {host} is in use, but not by a shiny-mcp-host sandbox "
+                    f"(no valid http://{host}:{port}/healthz). Stop that process or pick another "
+                    "port, e.g. start_sandbox_server(port=8766) / SANDBOX_PORT=8766."
+                )
+            logger.info("Reusing shiny-mcp-host sandbox %s on %s:%d", version, host, port)
             server = SandboxServer(host, port, public_host)
             _RUNNING[port] = server
             return server

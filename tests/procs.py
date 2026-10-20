@@ -103,3 +103,11 @@ def shiny_app(app_path: Path, port: int, env: dict[str, str]) -> Proc:
         port,
         env=env,
     )
+
+
+def sales_server(port: int) -> Proc:
+    return Proc(
+        "sales-server",
+        [sys.executable, str(ROOT / "examples/sales_explorer/server.py"), "--port", str(port)],
+        port,
+    )

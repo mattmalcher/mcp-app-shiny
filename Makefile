@@ -5,7 +5,7 @@ DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
 .PHONY: setup setup-compat build lint test-unit test-integration test-e2e test-security \
-        test-compat test-dist test demo demo-standalone clean
+        test-compat test-dist test demo demo-clock demo-standalone clean
 
 setup:                  ## reproducible Python + Node install (from uv.lock / package-lock.json)
 	uv sync --frozen
@@ -51,15 +51,14 @@ test-dist: build        ## A13: install the wheel into a clean venv and check as
 
 test: lint test-unit test-integration test-e2e test-security test-dist test-compat
 
-demo:                   ## official demo MCP server + the ui.Chat example on http://127.0.0.1:8000
-	@trap 'kill 0' EXIT; \
-	PORT=$(DEMO_PORT) node frontend/node_modules/@modelcontextprotocol/server-basic-vanillajs/dist/index.js & \
-	MCP_SERVER_URL=http://127.0.0.1:$(DEMO_PORT)/mcp $(PY) -m shiny run --host 127.0.0.1 --port $(APP_PORT) examples/chat/app.py
+demo:                   ## sales explorer showcase: MCP server + sandbox + Shiny chat app on http://127.0.0.1:8000
+	$(PY) scripts/demo.py sales
 
-demo-standalone:        ## same, with the standalone example
-	@trap 'kill 0' EXIT; \
-	PORT=$(DEMO_PORT) node frontend/node_modules/@modelcontextprotocol/server-basic-vanillajs/dist/index.js & \
-	MCP_SERVER_URL=http://127.0.0.1:$(DEMO_PORT)/mcp $(PY) -m shiny run --host 127.0.0.1 --port $(APP_PORT) examples/standalone/app.py
+demo-clock:             ## smoke test: official "Get Server Time" app in ui.Chat
+	$(PY) scripts/demo.py clock
+
+demo-standalone:        ## official "Get Server Time" app in a plain Shiny page
+	$(PY) scripts/demo.py standalone
 
 clean:
 	rm -rf dist build test-results .cache/wheel-venv .pytest_cache

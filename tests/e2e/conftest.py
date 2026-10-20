@@ -127,3 +127,12 @@ def new_page(browser, request):
     yield make
     for i, (context, page) in enumerate(made):
         _finish(context, page, request, f"-ctx{i}")
+
+
+@pytest.fixture(scope="session")
+def sales_app(sandbox_server):
+    server = procs.sales_server(procs.free_port())
+    try:
+        yield from _app(ROOT / "examples/sales_explorer/app.py", f"{server.url}/mcp", sandbox_server)
+    finally:
+        server.stop()

@@ -344,6 +344,37 @@ class MCPHost:
             return str(wid)
         return self.session.ns(target)
 
+    async def render_result(
+        self,
+        server: str,
+        tool: str,
+        arguments: Mapping[str, Any] | None = None,
+        result: CallToolResult | Mapping[str, Any] | None = None,
+        *,
+        target: str | Tag,
+        error: str | None = None,
+    ) -> RenderResult:
+        """Render the MCP App View for a tool call that has **already happened**.
+
+        Use this when your own code (e.g. an LLM agent loop calling
+        :meth:`call_tool`) made the call: the tool is not called again, so side
+        effects are never duplicated. ``result`` may be a ``CallToolResult`` or
+        its JSON form; pass ``error`` instead when the call failed, and the View
+        receives a cancellation. The View's later tool calls still go through
+        Python and :class:`HostPolicy`.
+        """
+        w, token = await self._begin_render(target, f"Rendering {tool}…")
+        if result is not None and not isinstance(result, CallToolResult):
+            try:
+                result = CallToolResult.model_validate(dict(result))
+            except Exception as e:  # noqa: BLE001 - reported in the widget
+                return await self._fail(
+                    w, token, server, tool, None, None, MCPHostError(f"Invalid tool result: {e}")
+                )
+        if result is None and error is None:
+            error = "No tool result was provided"
+        return await self._present(w, token, server, tool, arguments, result, error, prefetch=None)
+
     async def call_and_render(
         self,
         server: str,
@@ -354,58 +385,132 @@ class MCPHost:
     ) -> RenderResult:
         """Call ``tool`` on ``server`` and render its MCP App View in ``target``.
 
-        The widget may be mounted before or after this call; the View is started
-        once both the DOM element and the render data are available. Errors are
-        shown in the widget and returned in :attr:`RenderResult.error`.
+        Equivalent to :meth:`call_tool` followed by :meth:`render_result`, except
+        that the UI resource is fetched while the tool runs. The widget may be
+        mounted before or after this call. Errors are shown in the widget and
+        returned in :attr:`RenderResult.error`.
         """
-        widget_id = self._resolve_target(target)
-        w = self._widget(widget_id)
-        args = dict(arguments or {})
-        w.render_seq += 1
-        render_id = w.render_seq
-        await self._set_status(w, "loading", {"kind": "loading", "payload": {"label": f"Running {tool}…"}})
-        conn = self._server(server)
+        w, token = await self._begin_render(target, f"Running {tool}…")
+        try:
+            conn = self._server(server)
+            tool_def = await self._tool_def(server, tool)
+            uri = get_tool_ui_resource_uri(tool_def)
+        except MCPHostError as e:
+            return await self._fail(w, token, server, tool, None, None, e)
+        prefetch = asyncio.ensure_future(self._load_ui(server, uri)) if uri else None
         result: CallToolResult | None = None
+        error: str | None = None
+        try:
+            result = await conn.call_tool(tool, dict(arguments or {}))
+        except MCPHostError as e:
+            error = str(e)
+        return await self._present(w, token, server, tool, arguments, result, error, prefetch=prefetch)
+
+    # Render lifecycle. A widget's renders are ordered by ``token``; every
+    # outcome (View, text fallback, error) is published only through
+    # ``_publish``, which drops it if a newer render has started meanwhile.
+
+    async def _begin_render(self, target: str | Tag, label: str) -> tuple[_Widget, int]:
+        w = self._widget(self._resolve_target(target))
+        w.render_seq += 1
+        token = w.render_seq
+        await self._publish(w, token, "loading", {"kind": "loading", "payload": {"label": label}})
+        return w, token
+
+    def _is_current(self, w: _Widget, token: int) -> bool:
+        return self._widgets.get(w.id) is w and w.render_seq == token and not self._closed
+
+    async def _publish(
+        self,
+        w: _Widget,
+        token: int,
+        status: WidgetStatus,
+        message: dict[str, Any] | None,
+        render: _Render | None = None,
+    ) -> bool:
+        """Make ``token``'s outcome the widget's state, unless it is stale."""
+        if not self._is_current(w, token):
+            return False
+        if status != "loading":
+            w.render = render
+            await self._cancel_widget_tasks(w)
+        w.status = status
+        w.status_message = message
+        if message is not None:
+            await self._send(w.id, message["kind"], message["payload"])
+        if render is not None:
+            await self._push_render(w)
+        await _set_reactive(lambda: self._update_status_value(w.id, status))
+        return True
+
+    async def _tool_def(self, server: str, tool: str) -> Tool:
+        tool_def = await self._server(server).get_tool(tool)
+        if tool_def is None:
+            raise MCPHostError(f"Server {server!r} has no tool {tool!r}")
+        return tool_def
+
+    async def _load_ui(self, server: str, uri: str) -> tuple[str, Mapping[str, Any]]:
+        read = await self._server(server).read_resource(uri)
+        return extract_ui_html(read, expected_uri=uri, max_bytes=self.policy.max_resource_bytes)
+
+    async def _present(
+        self,
+        w: _Widget,
+        token: int,
+        server: str,
+        tool: str,
+        arguments: Mapping[str, Any] | None,
+        result: CallToolResult | None,
+        error: str | None,
+        *,
+        prefetch: asyncio.Future[tuple[str, Mapping[str, Any]]] | None,
+    ) -> RenderResult:
+        """Publish the outcome of a finished (or failed) tool call."""
         uri: str | None = None
         try:
-            tool_def = await conn.get_tool(tool)
-            if tool_def is None:
-                raise MCPHostError(f"Server {server!r} has no tool {tool!r}")
+            tool_def = await self._tool_def(server, tool)
             uri = get_tool_ui_resource_uri(tool_def)
-            call = asyncio.ensure_future(conn.call_tool(tool, args))
             if uri is None:
-                result = await call
-                await self._push_fallback(w, server, tool, result)
-                return RenderResult(widget_id, server, tool, result, None)
-            read = asyncio.ensure_future(conn.read_resource(uri))
-            done = await asyncio.gather(call, read, return_exceptions=True)
-            call_out, read_out = done
-            cancelled: dict[str, Any] | None = None
-            if isinstance(call_out, BaseException):
-                cancelled = {"reason": str(call_out) or type(call_out).__name__}
-            else:
-                result = call_out
-            if isinstance(read_out, BaseException):
-                raise read_out
-            html, ui_meta = extract_ui_html(
-                read_out, expected_uri=uri, max_bytes=self.policy.max_resource_bytes
-            )
-            if w.render_seq != render_id:
-                return RenderResult(widget_id, server, tool, result, uri, error="superseded")
-            message = self._render_message(
-                render_id, server, tool_def, uri, html, ui_meta, args, result, cancelled
-            )
-            w.render = _Render(render_id, server, tool, message)
-            w.status_message = None
-            await self._cancel_widget_tasks(w)
-            await self._set_status(w, "rendered", None)
-            await self._push_render(w)
-            return RenderResult(
-                widget_id, server, tool, result, uri, error=cancelled["reason"] if cancelled else None
-            )
+                if result is None:
+                    raise MCPHostError(error or "Tool call failed")
+                payload = {
+                    "server": server,
+                    "tool": tool,
+                    "text": _result_text(result),
+                    "is_error": bool(result.is_error),
+                }
+                ok = await self._publish(w, token, "rendered", {"kind": "fallback", "payload": payload})
+                return RenderResult(w.id, server, tool, result, None, error=None if ok else "superseded")
+            html, ui_meta = await (prefetch if prefetch is not None else self._load_ui(server, uri))
         except MCPHostError as e:
-            await self._push_error(w, e.code, str(e), result)
-            return RenderResult(widget_id, server, tool, result, uri, error=str(e))
+            return await self._fail(w, token, server, tool, uri, result, e)
+        finally:
+            if prefetch is not None and not prefetch.done():
+                prefetch.cancel()
+        cancelled = None if result is not None else {"reason": error or "Tool call failed"}
+        message = self._render_message(
+            token, server, tool_def, uri, html, ui_meta, dict(arguments or {}), result, cancelled
+        )
+        ok = await self._publish(w, token, "rendered", None, _Render(token, server, tool, message))
+        if not ok:
+            return RenderResult(w.id, server, tool, result, uri, error="superseded")
+        return RenderResult(w.id, server, tool, result, uri, error=error)
+
+    async def _fail(
+        self,
+        w: _Widget,
+        token: int,
+        server: str,
+        tool: str,
+        uri: str | None,
+        result: CallToolResult | None,
+        exc: MCPHostError,
+    ) -> RenderResult:
+        payload: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+        if result is not None:
+            payload["fallback_text"] = _result_text(result)
+        ok = await self._publish(w, token, "error", {"kind": "error", "payload": payload})
+        return RenderResult(w.id, server, tool, result, uri, error=str(exc) if ok else "superseded")
 
     async def render_in_chat(
         self,
@@ -414,13 +519,20 @@ class MCPHost:
         tool: str,
         arguments: Mapping[str, Any] | None = None,
         *,
+        result: CallToolResult | Mapping[str, Any] | None = None,
         text: str | None = None,
         height: int | str = 360,
     ) -> RenderResult:
-        """Append an assistant message containing a new widget to a ``ui.Chat`` and render into it."""
+        """Append an assistant message with a new widget to a ``ui.Chat`` and render into it.
+
+        Pass ``result`` when your agent loop already called the tool (uses
+        :meth:`render_result`); otherwise the tool is called (:meth:`call_and_render`).
+        """
         tag = self.widget(height=height)
         content = TagList(tag) if text is None else TagList(tags.p(text), tag)
         await chat.append_message({"role": "assistant", "content": content})
+        if result is not None:
+            return await self.render_result(server, tool, arguments, result, target=tag)
         return await self.call_and_render(server, tool, arguments, target=tag)
 
     def _render_message(
@@ -541,34 +653,9 @@ class MCPHost:
             current[widget_id] = status
         self._statuses.set(current)
 
-    async def _set_status(self, w: _Widget, status: WidgetStatus, message: dict[str, Any] | None) -> None:
-        w.status = status
-        if message is not None:
-            w.status_message = message
-            await self._send(w.id, message["kind"], message["payload"])
-        await _set_reactive(lambda: self._update_status_value(w.id, status))
-
     async def _push_render(self, w: _Widget) -> None:
         if w.render is not None and w.mount_id is not None:
             await self._send(w.id, "render", w.render.message, mount_id=w.mount_id)
-
-    async def _push_error(self, w: _Widget, code: str, message: str, result: CallToolResult | None) -> None:
-        payload: dict[str, Any] = {"code": code, "message": message}
-        if result is not None:
-            payload["fallback_text"] = _result_text(result)
-        w.render = None
-        await self._cancel_widget_tasks(w)
-        await self._set_status(w, "error", {"kind": "error", "payload": payload})
-
-    async def _push_fallback(self, w: _Widget, server: str, tool: str, result: CallToolResult) -> None:
-        w.render = None
-        payload = {
-            "server": server,
-            "tool": tool,
-            "text": _result_text(result),
-            "is_error": bool(result.is_error),
-        }
-        await self._set_status(w, "rendered", {"kind": "fallback", "payload": payload})
 
     async def _cancel_widget_tasks(self, w: _Widget) -> None:
         """Cancel a widget's in-flight View requests and settle each one in the browser."""

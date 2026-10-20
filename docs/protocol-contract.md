@@ -85,8 +85,12 @@ notifications (theme switching after mount), bookmark/history restoration.
 
 ### Initial data lifecycle
 
-Python performs `tools/call` and `resources/read` concurrently, validates the
-resource, then sends a single `render` message. In the browser the order is:
+`render_result` renders a tool result obtained elsewhere (no second
+`tools/call`); `call_and_render` calls the tool while it fetches the resource.
+Either way Python validates the resource, then sends a single `render`
+message. Each widget's renders are numbered, and every outcome (View, text
+fallback, error) is published through one check, so an older call that
+finishes late never replaces a newer render. In the browser the order is:
 load sandbox proxy → wait for nonce-bound `sandbox-proxy-ready` →
 `AppBridge.connect` → `sendSandboxResourceReady` → wait for
 `ui/notifications/initialized` → `sendToolInput` → `sendToolResult` (or
@@ -155,7 +159,9 @@ Shiny page (app origin, e.g. http://127.0.0.1:8000)
   (`SandboxConfigError`) or when it equals the app origin; the browser adapter
   re-checks against `location.origin` and refuses to render (fail closed).
   There is no same-origin fallback.
-- The sandbox server only serves `/sandbox.html` and `/sandbox.js`, only for
+- The sandbox server only serves `/sandbox.html`, `/sandbox.js` and `/healthz`
+  (which identifies it, so `start_sandbox_server` never mistakes another
+  process on its port for a sandbox), only for
   allow-listed host origins, sets `frame-ancestors <host origin>`, `no-store`,
   and builds the CSP **HTTP header** from the (Python-filtered, re-validated)
   resource CSP. Defaults are the spec's restrictive policy

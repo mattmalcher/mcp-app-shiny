@@ -1,27 +1,18 @@
 # Examples
 
-Both examples use the **unmodified official** ext-apps example server
-`@modelcontextprotocol/server-basic-vanillajs` (the "Get Server Time" MCP App),
-installed from npm by `make setup`.
-
 | Example | Command | What it shows |
 |---|---|---|
-| [`chat/app.py`](chat/app.py) | `make demo` | `ui.Chat`; type "what time is it?" and the View appears inside the assistant reply. "Send Message" in the View posts back into the chat. |
-| [`standalone/app.py`](standalone/app.py) | `make demo-standalone` | A widget in `ui.page_fluid`, plus outputs showing `ui/message` and model-context events. |
+| [`sales_explorer/`](sales_explorer/) | `make demo` | **The showcase.** An interactive sales explorer in `ui.Chat`. The agent's existing tool result is rendered with `render_result`; filters call tools through Python; the selected region comes back as model context; the app's question is answered by Python. |
+| [`chat/app.py`](chat/app.py) | `make demo-clock` | Smoke test: the unmodified official ext-apps "Get Server Time" app (npm `@modelcontextprotocol/server-basic-vanillajs`) in `ui.Chat`. |
+| [`standalone/app.py`](standalone/app.py) | `make demo-standalone` | The same official app in a plain `ui.page_fluid`, with outputs for `ui/message` and model context. |
 
-Then open **http://127.0.0.1:8000** (use `127.0.0.1`, not `localhost`: the
-sandbox runs at `http://localhost:8765`, a different origin and hostname).
+Each command starts the MCP server, the sandbox and the Shiny app, checks ports
+and prerequisites first, and prints the URL to open
+(**http://127.0.0.1:8000**). Ctrl+C stops everything. Options:
+`python scripts/demo.py --help` (ports via `--mcp-port`, `--app-port`,
+`--sandbox-port`).
 
-Manual equivalent:
-
-```bash
-PORT=3001 node frontend/node_modules/@modelcontextprotocol/server-basic-vanillajs/dist/index.js &
-MCP_SERVER_URL=http://127.0.0.1:3001/mcp shiny run --host 127.0.0.1 --port 8000 examples/chat/app.py
-```
-
-Environment variables: `MCP_SERVER_URL` (default `http://127.0.0.1:3001/mcp`),
-`SANDBOX_PORT` (default `8765`).
-
-The test-only fixture server (`tests/fixtures/fixture_server.py`) is a Python
-MCP Apps server with a counter View, a malicious View and broken resources;
-`tests/e2e/apps/fixture_app.py` hosts it.
+`sales_explorer/` has two parts: `server.py` is an MCP server with the
+`explore_sales` tool and its View (`view.html` plus the bundle built from
+`frontend/examples/sales-view.ts`); `app.py` is the Shiny app. The data is
+synthetic.

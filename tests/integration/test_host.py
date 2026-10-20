@@ -587,3 +587,94 @@ async def test_stdio_transport_with_official_server():
     finally:
         await host.close()
     assert not host._servers["demo"].connected
+
+
+# ------------------------------------------------------------ render_result
+
+
+async def test_render_result_does_not_call_the_tool_again(env):
+    host, session = env
+    await mount(host, session, "w1")
+    # An agent loop already called the tool (here: a side-effecting one).
+    result = await host.call_tool("fx", "increment", {"count": 1})
+    assert (await stats(host))["increment"] == 1
+    out = await host.render_result("fx", "increment", {"count": 1}, result, target="w1")
+    assert out.ok
+    msg = await session.wait_for(lambda m: m["kind"] == "render")
+    assert msg["payload"]["tool_result"]["structuredContent"] == {"count": 2}
+    assert msg["payload"]["tool_input"] == {"arguments": {"count": 1}}
+    assert (await stats(host))["increment"] == 1  # not called again
+
+
+async def test_render_result_accepts_wire_json_and_errors(env):
+    host, session = env
+    await mount(host, session, "w1")
+    wire = {"content": [{"type": "text", "text": "count=5"}], "structuredContent": {"count": 5}}
+    assert (await host.render_result("fx", "counter", {}, wire, target="w1")).ok
+    msg = await session.wait_for(lambda m: m["kind"] == "render")
+    assert msg["payload"]["tool_result"]["structuredContent"] == {"count": 5}
+    # A failed call still renders the View, which receives a cancellation.
+    out = await host.render_result("fx", "counter", {}, None, target="w1", error="agent aborted")
+    assert out.error == "agent aborted"
+    msg = await session.wait_for(lambda m: m["kind"] == "render" and m["payload"]["render_id"] == 2)
+    assert msg["payload"]["tool_cancelled"] == {"reason": "agent aborted"}
+    # Malformed results become a readable widget error.
+    bad = await host.render_result("fx", "counter", {}, {"content": "nope"}, target="w1")
+    assert "Invalid tool result" in bad.error
+    await session.wait_for(lambda m: m["kind"] == "error")
+
+
+async def test_render_result_without_ui_shows_text_fallback(env):
+    host, session = env
+    await mount(host, session, "w1")
+    result = await host.call_tool("fx", "plain", {"text": "hi"})
+    await host.render_result("fx", "plain", {"text": "hi"}, result, target="w1")
+    fb = await session.wait_for(lambda m: m["kind"] == "fallback")
+    assert fb["payload"]["text"] == "plain: hi"
+
+
+async def test_unknown_server_is_a_widget_error(env):
+    host, session = env
+    await mount(host, session, "w1")
+    out = await host.call_and_render("nope", "counter", {}, target="w1")
+    assert "Unknown MCP server" in out.error
+    await session.wait_for(lambda m: m["kind"] == "error")
+
+
+@pytest.mark.parametrize("slow_tool", ["slow-ui", "slow"])  # View and text-fallback outcomes
+async def test_stale_outcomes_never_overwrite_a_newer_render(env, slow_tool):
+    host, session = env
+    await mount(host, session, "w1")
+    older = asyncio.create_task(host.call_and_render("fx", slow_tool, {"seconds": 1.0}, target="w1"))
+    await asyncio.sleep(0.2)
+    newer = await host.call_and_render("fx", "counter", {"start": 9}, target="w1")
+    assert newer.ok
+    assert (await older).error == "superseded"
+    final = [m for m in session.sent if m["kind"] in ("render", "fallback", "error")]
+    assert len(final) == 1 and final[0]["payload"]["tool_result"]["structuredContent"] == {"count": 9}
+    # A remount still gets the newest render.
+    await mount(host, session, "w1", "m2")
+    again = await session.wait_for(lambda m: m["kind"] == "render" and m.get("mount_id") == "m2")
+    assert again["payload"]["tool_result"]["structuredContent"] == {"count": 9}
+
+
+async def test_stale_error_does_not_overwrite(env):
+    host, session = env
+    await mount(host, session, "w1")
+    gate = asyncio.Event()
+    conn = host._servers["fx"]
+    real_read = conn.read_resource
+
+    async def gated_read(uri, **kw):
+        if uri == "ui://fixture/broken-mime.html":
+            await gate.wait()  # hold the older call until the newer render is published
+        return await real_read(uri, **kw)
+
+    conn.read_resource = gated_read
+    older = asyncio.create_task(host.call_and_render("fx", "broken-mime", {}, target="w1"))
+    await asyncio.sleep(0.3)
+    assert (await host.call_and_render("fx", "counter", {"start": 2}, target="w1")).ok
+    gate.set()
+    assert (await older).error == "superseded"
+    assert session.of("error") == []
+    assert session.of("render")[-1]["payload"]["tool_result"]["structuredContent"] == {"count": 2}

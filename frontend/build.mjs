@@ -28,3 +28,10 @@ await build({
   entryPoints: [join(here, "fixtures/fixture-view.ts")],
   outfile: join(here, "..", "tests", "fixtures", "view.bundle.js"),
 });
+
+// Showcase View for examples/sales_explorer.
+await build({
+  ...common,
+  entryPoints: [join(here, "examples/sales-view.ts")],
+  outfile: join(here, "..", "examples", "sales_explorer", "view.bundle.js"),
+});
