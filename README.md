@@ -36,7 +36,7 @@ Then:
 
 Ctrl+C stops everything. `make demo-clock` runs the official ext-apps "Get
 Server Time" app instead, unmodified, as a compatibility smoke test; that one
-needs Node (`make setup-dev`), because the official server is an npm package.
+needs Node (`make setup-node`), because the official server is an npm package.
 
 ## Use it in your app
 
@@ -348,7 +348,8 @@ built in.
 ## Development
 
 ```bash
-make setup-dev         # setup + npm ci, browser builds, Playwright (needs Node 20+)
+make setup-dev         # setup + Playwright Chromium (no Node)
+make setup-node        # npm ci + browser builds (needs Node 20+)
 make build             # browser bundle + wheel/sdist into dist/
 make vendor-sdk        # update the bundled MCP Apps SDK from npm (Python only)
 make test              # everything below, plus lint
@@ -360,8 +361,11 @@ make test-compat       # same official app in the upstream ext-apps basic-host
 make test-dist         # install the wheel in a clean venv and check it
 ```
 
-Node is only needed to change the host's TypeScript (`frontend/`) and to run
-the tests; its builds are committed to `src/shiny_mcp_host/static/`.
+Node is only needed to change the host's TypeScript (`frontend/`, whose builds
+are committed to `src/shiny_mcp_host/static/`), for Vitest and lint's type
+check, and for the tests that run the official npm demo server or upstream
+basic-host. Without it, `make setup-dev` is enough for the pytest suites: the
+official-server tests skip (set `REQUIRE_OFFICIAL=1` to make them fail instead).
 
 Layout: `src/shiny_mcp_host/` (package; `static/` holds the compiled bundle and
 the vendored SDK), `frontend/` (TypeScript), `examples/`, `tests/`, `docs/`.

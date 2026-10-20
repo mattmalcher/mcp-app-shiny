@@ -573,12 +573,12 @@ def test_sandbox_same_origin_as_app_refused():
 
 
 async def test_stdio_transport_with_official_server():
-    from tests.procs import FRONTEND
+    from tests.procs import OFFICIAL_SERVER, require_official_server
 
-    script = FRONTEND / "node_modules/@modelcontextprotocol/server-basic-vanillajs/dist/index.js"
+    require_official_server()
     session = FakeSession()
     host = MCPHost(session, sandbox_url=SANDBOX)  # type: ignore[arg-type]
-    host.add_server("demo", transport="stdio", command="node", args=[str(script), "--stdio"])
+    host.add_server("demo", transport="stdio", command="node", args=[str(OFFICIAL_SERVER), "--stdio"])
     try:
         await mount(host, session, "w")
         result = await host.call_and_render("demo", "get-time", {}, target="w")

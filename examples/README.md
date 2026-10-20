@@ -23,4 +23,4 @@ it needs only `mcp`. It exposes an ASGI `app` (`server:app`) for hosting
 platforms such as Posit Connect.
 
 `make demo` needs only `make setup`; `make demo-clock` and `make
-demo-standalone` run the official npm server, so they need Node (`make setup-dev`).
+demo-standalone` run the official npm server, so they need Node (`make setup-node`).

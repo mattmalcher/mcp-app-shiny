@@ -221,7 +221,6 @@ __marimo__/
 
 # shiny-mcp-host
 frontend/node_modules/
-tests/fixtures/view.bundle.js
 test-results/
 .pytest_cache/
 .cache/

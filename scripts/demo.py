@@ -68,7 +68,7 @@ def main() -> None:
 
     # Prerequisites, with the fix for each.
     if not (ROOT / "src/shiny_mcp_host/static/shiny-mcp-host.js").exists():
-        fail("Browser bundle missing from src/shiny_mcp_host/static. Run `make setup-dev` to rebuild it.")
+        fail("Browser bundle missing from src/shiny_mcp_host/static. Run `make setup-node` to rebuild it.")
     if args.example == "sales":
         mcp_cmd = [
             sys.executable,
@@ -83,7 +83,7 @@ def main() -> None:
                 "(`make demo` doesn't)."
             )
         if not OFFICIAL_SERVER.exists():
-            fail("Official demo server not installed. Run `make setup-dev` (npm ci in frontend/).")
+            fail("Official demo server not installed. Run `make setup-node` (npm ci in frontend/).")
         mcp_cmd = ["node", str(OFFICIAL_SERVER)]
     for port, what, flag in [
         (args.mcp_port, "MCP server", "--mcp-port / DEMO_PORT"),

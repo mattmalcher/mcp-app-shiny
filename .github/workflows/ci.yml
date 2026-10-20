@@ -8,6 +8,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      REQUIRE_OFFICIAL: "1"  # official npm server tests must run here, not skip
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +38,7 @@ jobs:
 
       - name: Setup
         run: |
-          make setup-dev
+          make setup-dev setup-node
           .venv/bin/python -m playwright install --with-deps chromium
 
       - name: Bundled assets are up to date

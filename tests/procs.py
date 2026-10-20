@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -14,6 +15,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
 LOG_DIR = ROOT / "test-results" / "logs"
+OFFICIAL_SERVER = FRONTEND / "node_modules/@modelcontextprotocol/server-basic-vanillajs/dist/index.js"
+
+
+def require_official_server() -> None:
+    """Skip unless Node and the official npm demo server are installed (fail if REQUIRE_OFFICIAL=1)."""
+    if shutil.which("node") and OFFICIAL_SERVER.exists():
+        return
+    import pytest
+
+    message = "official ext-apps demo server needs Node 20+ and `make setup-node` (npm ci in frontend/)"
+    if os.environ.get("REQUIRE_OFFICIAL"):
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 def free_port() -> int:
@@ -86,10 +100,8 @@ def fixture_server(port: int) -> Proc:
 
 def demo_server(port: int) -> Proc:
     """The unmodified official ext-apps example server, installed from npm."""
-    bin_path = FRONTEND / "node_modules/@modelcontextprotocol/server-basic-vanillajs/dist/index.js"
-    if not bin_path.exists():
-        raise RuntimeError("Run `make setup` (npm ci in frontend/) to install the official demo server")
-    return Proc("demo-server", ["node", str(bin_path)], port, env={"PORT": str(port)})
+    require_official_server()
+    return Proc("demo-server", ["node", str(OFFICIAL_SERVER)], port, env={"PORT": str(port)})
 
 
 def sandbox_server(port: int) -> Proc:

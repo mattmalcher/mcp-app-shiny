@@ -22,10 +22,3 @@ await build({ ...common, entryPoints: [join(here, "src/host.ts")], outfile: join
 await build({ ...common, entryPoints: [join(here, "src/sandbox-proxy.ts")], outfile: join(outdir, "sandbox.js") });
 copyFileSync(join(here, "src/styles.css"), join(outdir, "shiny-mcp-host.css"));
 
-// Test fixture View (official App SDK) used by the fixture MCP server.
-await build({
-  ...common,
-  entryPoints: [join(here, "fixtures/fixture-view.ts")],
-  outfile: join(here, "..", "tests", "fixtures", "view.bundle.js"),
-});
-
