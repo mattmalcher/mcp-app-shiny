@@ -200,8 +200,13 @@ An HTTPS app requires an HTTPS sandbox. See [deployment.md](deployment.md).
 
 ### Without a second hostname
 
-Not implemented; recorded here as the fallback for deployments that can only
-use one hostname (e.g. a single Posit Connect server without a DNS alias).
+Not implemented as written; recorded here as a fallback for deployments that
+can only use one hostname (e.g. a single Posit Connect server without a DNS
+alias). What is implemented is the simpler, experimental
+[trusted mode](architecture.md#trusted-mode-dangerously_trust_appstrue): the
+same opaque-origin `srcdoc` frame and `<meta>` CSP, but holding the View
+itself with no proxy, and only for apps you control. The design below
+would keep the proxy layer and so be closer to the spec.
 
 Instead of loading the outer proxy from a URL, the host would build it from
 inline HTML (`srcdoc`) in an iframe with `sandbox="allow-scripts allow-forms"`

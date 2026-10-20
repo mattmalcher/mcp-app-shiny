@@ -16,11 +16,13 @@ needs its own hostname, because it keeps third-party HTML away from your
 page's DOM, cookies and inputs. Without it the host refuses to render. See
 [architecture.md](architecture.md#why-the-sandbox-needs-its-own-hostname).
 
-**No second hostname, and you wrote every MCP App you host?**
-`MCPHost(session, dangerously_trust_apps=True)` runs Views without the
-sandbox server, so there is nothing extra to deploy. It is experimental and
-gives up guarantees the sandbox provides; read
-[trusted mode](architecture.md#trusted-mode-dangerously_trust_appstrue) first.
+**No second hostname, and you wrote every MCP App you host?** Trusted mode
+(`SHINY_MCP_DANGEROUSLY_TRUST_APPS=1`, or `dangerously_trust_apps=True` in
+code) runs Views without the sandbox server, so there is no sandbox to
+deploy. It is experimental and gives up guarantees the sandbox provides;
+read [trusted mode](architecture.md#trusted-mode-dangerously_trust_appstrue)
+first, then see [the trusted-mode variant](#trusted-mode-variant-no-sandbox)
+of the recipe below.
 
 ## Local development
 
@@ -171,6 +173,44 @@ complete set of checks (server, browser, isolation, with evidence) see
 | Shiny's websocket works for the app (standard Connect behaviour) | — | **assumption** |
 
 Update this table when the runbook has been run.
+
+### Trusted-mode variant (no sandbox)
+
+For a server with no second hostname, when every MCP App you host is your
+own. Deploy only the MCP server (as above) and the Shiny app, with trusted
+mode on and **no** `SHINY_MCP_SANDBOX_URL`:
+
+```bash
+rsconnect deploy shiny -s "$CONNECT_SERVER" -k "$CONNECT_API_KEY" \
+  --entrypoint app:app --title "Sales explorer" \
+  -E MCP_SERVER_URL=https://connect.example.com/content/<mcp-guid>/mcp \
+  -E SHINY_MCP_DANGEROUSLY_TRUST_APPS=1 \
+  -E MCP_SERVER_API_KEY \
+  dist/connect/shiny-app
+```
+
+Only `1` or `true` turn it on; any other value keeps the sandbox (and then,
+without `SHINY_MCP_SANDBOX_URL`, the example starts its local development
+sandbox, which browsers cannot reach on a server). Code that passes
+`dangerously_trust_apps=False` ignores the variable. Anyone who can edit the
+content's variables can switch the sandbox off this way, so restrict who
+administers the Shiny app; the host logs a warning for every session in
+trusted mode.
+
+One Connect-specific risk: each View is an `srcdoc` iframe, which
+**inherits the Content Security Policy of the Shiny page**. If Connect or a
+proxy sends a CSP on the app without `'unsafe-inline'` in `script-src`, View
+scripts are blocked and the widget times out (`view_init_timeout`). Check it:
+
+```bash
+.venv/bin/python scripts/check_deployment.py --trusted \
+  --app-url https://connect.example.com/content/<app-guid>/ \
+  --mcp-url https://connect.example.com/content/<mcp-guid>/mcp
+```
+
+Locally: `make rehearse-connect-trusted`. On Connect, this variant is
+**pending**: see
+[posit-connect-validation.md](posit-connect-validation.md#trusted-mode-variant).
 
 ## Other platforms
 

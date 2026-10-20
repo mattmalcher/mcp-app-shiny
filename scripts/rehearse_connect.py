@@ -1,6 +1,6 @@
 """Rehearse the Posit Connect deployment locally, then check it like a real one.
 
-    python scripts/rehearse_connect.py [BUNDLE_DIR]      (make rehearse-connect; default dist/connect)
+    python scripts/rehearse_connect.py [--trusted] [BUNDLE_DIR]   (make rehearse-connect[-trusted])
 
 For each folder made by package_connect.py: create a clean virtualenv, install
 only that folder's requirements.txt (from inside the folder, as a server
@@ -9,6 +9,10 @@ docs/deployment.md sets on Connect. The three run on separate ports, with the
 sandbox reached as ``localhost`` and the others as ``127.0.0.1``, so the
 sandbox has its own hostname. Then scripts/check_deployment.py runs every
 server, browser and isolation check against them.
+
+--trusted rehearses the trusted-mode deployment instead: only the MCP server
+and the Shiny app, with SHINY_MCP_DANGEROUSLY_TRUST_APPS=1 and no sandbox,
+checked with check_deployment.py --trusted.
 
 This proves the bundles, entry points, environment variables and the flow. It
 does not exercise Connect itself (routing, content URLs, authentication, the
@@ -72,7 +76,10 @@ def start(name: str, cmd: list[str], folder: Path, port: int, env: dict[str, str
 
 
 def main() -> None:
-    bundles = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "dist/connect"
+    argv = sys.argv[1:]
+    trusted = "--trusted" in argv
+    argv = [a for a in argv if a != "--trusted"]
+    bundles = Path(argv[0]) if argv else ROOT / "dist/connect"
     if not (bundles / "shiny-app/app.py").exists():
         sys.exit(f"No bundles in {bundles}; run `make connect-bundles` first.")
     ports = {name: free_port() for name in ("mcp-server", "sandbox", "shiny-app")}
@@ -85,6 +92,9 @@ def main() -> None:
         "sandbox": ("app:app", {"SHINY_APP_ORIGIN": app_origin}),
         "shiny-app": ("app:app", {"MCP_SERVER_URL": mcp_url, "SHINY_MCP_SANDBOX_URL": sandbox_url}),
     }
+    if trusted:
+        del plan["sandbox"]
+        plan["shiny-app"] = ("app:app", {"MCP_SERVER_URL": mcp_url, "SHINY_MCP_DANGEROUSLY_TRUST_APPS": "1"})
     procs: list[subprocess.Popen[bytes]] = []
     try:
         for name, (entry, env) in plan.items():
@@ -98,12 +108,11 @@ def main() -> None:
             str(ROOT / "scripts/check_deployment.py"),
             "--app-url",
             f"{app_origin}/",
-            "--sandbox-url",
-            sandbox_url,
+            *(["--trusted"] if trusted else ["--sandbox-url", sandbox_url]),
             "--mcp-url",
             mcp_url,
             "--evidence-dir",
-            str(LOGS / "evidence"),
+            str(LOGS / ("evidence-trusted" if trusted else "evidence")),
         ]
         code = subprocess.run(check).returncode
     finally:

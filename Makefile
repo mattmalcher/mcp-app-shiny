@@ -5,7 +5,7 @@ DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
 .PHONY: setup setup-dev setup-node vendor-sdk setup-compat build lint test-unit test-integration test-e2e test-security \
-        test-compat test-dist demo-server-bundle connect-bundles rehearse-connect test demo demo-clock \
+        test-compat test-dist demo-server-bundle connect-bundles rehearse-connect rehearse-connect-trusted test demo demo-clock \
         demo-standalone clean
 
 setup:                  ## Python env from uv.lock: all you need for `make demo` (no Node)
@@ -65,6 +65,9 @@ connect-bundles:        ## the three Posit Connect deployment folders in dist/co
 
 rehearse-connect: connect-bundles  ## run those folders locally from clean venvs, then scripts/check_deployment.py
 	$(PY) scripts/rehearse_connect.py
+
+rehearse-connect-trusted: connect-bundles  ## the same, in trusted mode: MCP server + Shiny app only, no sandbox
+	$(PY) scripts/rehearse_connect.py --trusted
 
 test: lint test-unit test-integration test-e2e test-security test-dist test-compat
 

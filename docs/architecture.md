@@ -152,6 +152,11 @@ whose MCP Apps all come from servers you control:
 host = MCPHost(session, dangerously_trust_apps=True)   # no sandbox_url
 ```
 
+or, without a code change, `SHINY_MCP_DANGEROUSLY_TRUST_APPS=1` in the
+environment (only `1` or `true` count; code that passes
+`dangerously_trust_apps=False` ignores it). Deployment:
+[deployment.md](deployment.md#trusted-mode-variant-no-sandbox).
+
 There is no sandbox server and no proxy. Each View is loaded straight into
 one iframe on the Shiny page, from `srcdoc`, with
 `sandbox="allow-scripts allow-forms"` (no `allow-same-origin`), and the

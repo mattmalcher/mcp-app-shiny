@@ -560,6 +560,7 @@ async def test_sessions_with_identical_widget_ids_are_isolated(fixture_server):
 
 def test_sandbox_required(monkeypatch):
     monkeypatch.delenv("SHINY_MCP_SANDBOX_URL", raising=False)
+    monkeypatch.delenv("SHINY_MCP_DANGEROUSLY_TRUST_APPS", raising=False)
     with pytest.raises(SandboxConfigError):
         MCPHost(FakeSession())  # type: ignore[arg-type]
     with pytest.raises(SandboxConfigError):
@@ -576,7 +577,31 @@ def test_sandbox_same_origin_as_app_refused():
     MCPHost(session, sandbox_url="http://127.0.0.1:8765/sandbox.html")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("value", "trusted"),
+    [("1", True), ("true", True), ("TRUE", True), (" 1 ", True), ("", False), ("0", False), ("false", False)],
+)
+def test_trusted_mode_from_environment(monkeypatch, value, trusted):
+    monkeypatch.setenv("SHINY_MCP_SANDBOX_URL", SANDBOX)
+    monkeypatch.setenv("SHINY_MCP_DANGEROUSLY_TRUST_APPS", value)
+    host = MCPHost(FakeSession())  # type: ignore[arg-type]
+    assert host.trusted is trusted
+    assert host.sandbox_url == (None if trusted else SANDBOX)
+
+
+def test_trusted_mode_environment_is_strict_and_code_wins(monkeypatch, caplog):
+    monkeypatch.setenv("SHINY_MCP_SANDBOX_URL", SANDBOX)
+    monkeypatch.setenv("SHINY_MCP_DANGEROUSLY_TRUST_APPS", "yes")
+    assert MCPHost(FakeSession()).trusted is False  # type: ignore[arg-type]
+    assert "Ignoring SHINY_MCP_DANGEROUSLY_TRUST_APPS='yes'" in caplog.text
+    monkeypatch.setenv("SHINY_MCP_DANGEROUSLY_TRUST_APPS", "1")
+    assert MCPHost(FakeSession(), dangerously_trust_apps=False).trusted is False  # type: ignore[arg-type]
+    with pytest.raises(SandboxConfigError, match="SHINY_MCP_DANGEROUSLY_TRUST_APPS=1 does not use a sandbox"):
+        MCPHost(FakeSession(), sandbox_url=SANDBOX)  # type: ignore[arg-type]
+
+
 def test_trusted_mode_needs_no_sandbox_and_refuses_ambiguous_config(monkeypatch):
+    monkeypatch.delenv("SHINY_MCP_DANGEROUSLY_TRUST_APPS", raising=False)
     monkeypatch.setenv("SHINY_MCP_SANDBOX_URL", SANDBOX)
     host = MCPHost(FakeSession(), dangerously_trust_apps=True)  # type: ignore[arg-type]
     assert host.sandbox_url is None

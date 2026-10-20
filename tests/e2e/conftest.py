@@ -63,12 +63,12 @@ def fixture_app(fixture_server, sandbox_server):
 
 @pytest.fixture(scope="session")
 def trusted_fixture_app(fixture_server, sandbox_server):
-    # SHINY_MCP_SANDBOX_URL stays set: trusted mode must ignore the env var.
+    # SHINY_MCP_SANDBOX_URL stays set: trusted mode from the environment ignores it.
     yield from _app(
         ROOT / "tests/e2e/apps/fixture_app.py",
         f"{fixture_server.url}/mcp",
         sandbox_server,
-        {"FIXTURE_TRUSTED": "1"},
+        {"SHINY_MCP_DANGEROUSLY_TRUST_APPS": "1"},
     )
 
 

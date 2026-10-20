@@ -52,14 +52,29 @@ __all__ = (
     "ModelContextEvent",
     "AppMessageEvent",
     "SANDBOX_URL_ENV",
+    "TRUST_APPS_ENV",
 )
 
 logger = logging.getLogger("shiny_mcp_host")
 
 #: Environment variable consulted when ``sandbox_url`` is not passed.
 SANDBOX_URL_ENV = "SHINY_MCP_SANDBOX_URL"
+#: Environment variable consulted when ``dangerously_trust_apps`` is not passed.
+#: Only ``1`` or ``true`` (any case) turn trusted mode on.
+TRUST_APPS_ENV = "SHINY_MCP_DANGEROUSLY_TRUST_APPS"
 #: Custom message type used for every Python -> browser message.
 CUSTOM_MESSAGE_TYPE = "shiny-mcp-host"
+
+
+def _trust_apps_from_env() -> bool:
+    value = os.environ.get(TRUST_APPS_ENV, "").strip()
+    if value.lower() in ("1", "true"):
+        return True
+    if value and value.lower() not in ("0", "false"):
+        logger.warning(
+            "Ignoring %s=%r: only 1 or true enable trusted mode; the sandbox stays on.", TRUST_APPS_ENV, value
+        )
+    return False
 
 
 @dataclass(frozen=True)
@@ -213,7 +228,7 @@ class MCPHost:
         fallback: without it, :class:`SandboxConfigError` is raised (unless
         ``dangerously_trust_apps`` is set).
     dangerously_trust_apps
-        Run Views without the separate-origin sandbox, for deployments that
+        ``True`` runs Views without the separate-origin sandbox, for deployments that
         cannot get a second hostname and only host apps you wrote. Each View
         is loaded directly into one ``srcdoc`` iframe on the Shiny page,
         without ``allow-same-origin`` and with its CSP in a ``<meta>`` tag.
@@ -221,7 +236,10 @@ class MCPHost:
         gives (see docs/architecture.md, "Trusted mode"); only use it for
         MCP servers whose HTML you control. ``HostPolicy`` still authorises
         every tool call. Cannot be combined with ``sandbox_url`` or
-        ``HostPolicy(view_same_origin=True)``.
+        ``HostPolicy(view_same_origin=True)``. ``None`` (the default) reads
+        ``SHINY_MCP_DANGEROUSLY_TRUST_APPS``: only ``1`` or ``true`` enable it,
+        any other value leaves the sandbox on. ``False`` keeps the sandbox
+        whatever the environment says.
     policy
         Authorisation and limits; see :class:`HostPolicy`.
     theme
@@ -236,19 +254,20 @@ class MCPHost:
         sandbox_url: str | None = None,
         policy: HostPolicy | None = None,
         theme: Literal["light", "dark"] = "light",
-        dangerously_trust_apps: bool = False,
+        dangerously_trust_apps: bool | None = None,
     ) -> None:
         self.session = require_active_session(session)
         self.id = self.session.ns(id)
         self.policy = policy or HostPolicy()
         self.theme = theme
-        self.trusted = dangerously_trust_apps
+        self.trusted = _trust_apps_from_env() if dangerously_trust_apps is None else dangerously_trust_apps
         self.sandbox_url: str | None = None
         if self.trusted:
             if sandbox_url:
-                raise SandboxConfigError(
-                    "dangerously_trust_apps=True does not use a sandbox; drop sandbox_url."
+                source = (
+                    f"{TRUST_APPS_ENV}=1" if dangerously_trust_apps is None else "dangerously_trust_apps=True"
                 )
+                raise SandboxConfigError(f"{source} does not use a sandbox; drop sandbox_url.")
             if self.policy.view_same_origin:
                 raise SandboxConfigError(
                     "view_same_origin cannot be combined with dangerously_trust_apps: the View would "

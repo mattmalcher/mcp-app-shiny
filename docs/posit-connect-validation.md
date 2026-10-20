@@ -31,6 +31,12 @@ what Connect does differently.
 > section with what you observed, remove the temporary content, and summarise
 > what passed, what failed and what remains open.
 >
+> Then validate the trusted-mode variant (section "Trusted-mode variant"):
+> redeploy only the Shiny app with `SHINY_MCP_DANGEROUSLY_TRUST_APPS=1` and
+> no sandbox URL, run `scripts/check_deployment.py --trusted`, and record the
+> result separately. It does not need the sandbox alias, so run it even if
+> the baseline is blocked on an administrator change.
+>
 > Once the three-content baseline is validated, evaluate serving Shiny and the
 > sandbox from one ASGI application, accessed through separate hostnames (see
 > "Next step: one application, two hostnames"). Keep the three-content
@@ -273,6 +279,78 @@ The Connect recipe may be called **verified** only when all of these hold:
 Partial success is still worth recording: mark individual rows verified and
 leave the status note saying what is pending.
 
+## Trusted-mode variant
+
+Trusted mode (`SHINY_MCP_DANGEROUSLY_TRUST_APPS=1`; see
+[architecture.md](architecture.md#trusted-mode-dangerously_trust_appstrue))
+runs Views without a sandbox, for servers that cannot get a second hostname.
+It needs only the MCP server and the Shiny app, so it can be validated
+without the alias. Rehearse it first on the same revision:
+
+```bash
+make rehearse-connect-trusted     # MCP server + Shiny app from clean venvs, then check_deployment.py --trusted
+```
+
+**Deploy.** Reuse the MCP server from section 3 (or deploy it as described
+there). Deploy the `dist/connect/shiny-app` bundle as a **separate** temporary
+content item titled `TEMP mcp-app-shiny validation trusted app`, with:
+
+- `MCP_SERVER_URL=$CONNECT_SERVER/content/<mcp-guid>/mcp`
+- `MCP_SERVER_API_KEY=<key>` (as in section 3)
+- `SHINY_MCP_DANGEROUSLY_TRUST_APPS=1`
+- **no** `SHINY_MCP_SANDBOX_URL`
+
+Do not switch the baseline Shiny app item to trusted mode; keep the two
+separate so each result stays attributable.
+
+**Check.**
+
+```bash
+APP_API_KEY=... MCP_API_KEY=... .venv/bin/python scripts/check_deployment.py --trusted \
+  --app-url "$CONNECT_SERVER/content/<trusted-app-guid>/" \
+  --mcp-url "$CONNECT_SERVER/content/<mcp-guid>/mcp" \
+  --evidence-dir test-results/connect-validation-trusted
+```
+
+It runs the same MCP and browser checks as section 5, and instead of the
+sandbox checks:
+
+- **`[server] app page CSP`**: whether the Shiny page's response carries a
+  `Content-Security-Policy`. This is the main Connect-specific risk: a View
+  is an `srcdoc` iframe and inherits the page's CSP, so a policy without
+  `'unsafe-inline'` in `script-src` blocks every View. `PASS` means no
+  policy; `INCONCLUSIVE` records the policy, and the browser checks decide
+  whether Views still run.
+- **`[isolation] View frame`**: the widget holds one iframe, from `srcdoc`,
+  with `sandbox="allow-scripts allow-forms"`;
+- **`[isolation] View cannot reach the Shiny page`** (opaque origin `null`,
+  no `parent`/`top` document, no app cookie), **`View cannot fetch`**, and
+  **`unauthorised tool call refused`**, as in section 6.
+
+Also confirm in the Shiny app's content log that the host logged
+`dangerously_trust_apps=True; MCP App Views run without the separate-origin
+sandbox` (once per session), and record whether Connect's dashboard shows
+the variable's value to viewers of the content settings.
+
+**Failure diagnosis.**
+
+| Symptom | Likely cause | Fix (scope) |
+|---|---|---|
+| `explorer renders` FAIL, `data-error-code=view_init_timeout`; console shows `Refused to execute inline script` | The app page's CSP (Connect or a proxy) is inherited by the View | Record the header. Administrator: exempt the app from that CSP, or allow `'unsafe-inline'` in its `script-src`. Do not work around it in the library without a separate decision. |
+| `explorer renders` FAIL, `data-error-code=sandbox_config` or `sandbox_unreachable` | Trusted mode is not on: variable missing, misspelt or not `1`/`true`, or `SHINY_MCP_SANDBOX_URL` also set and passed in code | Content → Vars; content log shows "Ignoring SHINY_MCP_DANGEROUSLY_TRUST_APPS=…" for a bad value |
+| App fails to start: `SHINY_MCP_DANGEROUSLY_TRUST_APPS=1 does not use a sandbox; drop sandbox_url` | The app code passes `sandbox_url` explicitly | Use the bundled example unchanged (it passes none when trusted mode is set) |
+| Any isolation check FAIL | Treat as a security issue | Stop, record it, do not relax anything |
+
+**Acceptance.** The trusted-mode variant may be called **verified** on
+Connect when `make rehearse-connect-trusted` passes on the revision,
+`check_deployment.py --trusted` exits `0` with `--mcp-url` and an MCP key
+(`"completed": true, "passed": true`; an `INCONCLUSIVE` app page CSP counts
+as not passed until the policy is removed or shown harmless and recorded),
+and `docs/deployment.md` ("Trusted-mode variant") is updated with the date,
+Connect version and revision. Record results under "Results" with a
+**Trusted mode** heading; clean up the extra content item with the rest
+(section 9).
+
 ## Next step: one application, two hostnames
 
 The baseline uses three content items. Browser isolation needs the sandbox on
@@ -299,7 +377,8 @@ arrangement yet.
 
 Temporary items, all created by this runbook:
 
-- the three content items titled `TEMP mcp-app-shiny validation …` (delete
+- the content items titled `TEMP mcp-app-shiny validation …` (three, plus
+  the trusted-mode app if you deployed it; delete
   them by GUID from the dashboard, or
   `curl -X DELETE -H "Authorization: Key $CONNECT_API_KEY" "$CONNECT_SERVER/__api__/v1/content/<guid>"`
   for each recorded GUID; check the title before deleting, and never delete

@@ -99,7 +99,7 @@ class ViewSession {
     await withTimeout(
       loaded.initialized,
       INIT_TIMEOUT_MS,
-      new HostError("view_init_timeout", "The MCP App loaded in the sandbox but did not complete initialization"),
+      new HostError("view_init_timeout", "The MCP App loaded but did not complete initialization"),
     );
     if (this.closed) return;
     this.initialized = true;
