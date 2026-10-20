@@ -154,7 +154,10 @@ class ServerConnection:
             except TimeoutError:
                 await self._stop_owner()
                 raise RequestTimeoutError(f"Timed out connecting to MCP server {self.name!r}") from None
-            except BaseException as e:
+            except asyncio.CancelledError:
+                await self._stop_owner()
+                raise
+            except Exception as e:  # noqa: BLE001 - any connect failure is surfaced
                 await self._stop_owner()
                 leaf = _unwrap(e)
                 raise ServerUnavailableError(

@@ -168,19 +168,23 @@ _ui_tool("huge-ui", HUGE_URI)
 _ui_tool("missing-ui", "ui://fixture/does-not-exist.html")
 
 
-@mcp.tool(name="slow-ui", description="UI tool whose call is slow.", meta={"ui": {"resourceUri": COUNTER_URI}})
+@mcp.tool(
+    name="slow-ui", description="UI tool whose call is slow.", meta={"ui": {"resourceUri": COUNTER_URI}}
+)
 async def slow_ui(seconds: float = 5.0) -> CallToolResult:
     await asyncio.sleep(seconds)
     return CallToolResult(content=[TextContent(type="text", text="count=1")], structured_content={"count": 1})
 
 
-mcp.add_resource(TextResource(uri=BROKEN_MIME_URI, name="broken-mime", mime_type="text/html", text="<p>x</p>"))
+mcp.add_resource(
+    TextResource(uri=BROKEN_MIME_URI, name="broken-mime", mime_type="text/html", text="<p>x</p>")
+)
 mcp.add_resource(TextResource(uri=EMPTY_URI, name="empty", mime_type="text/html;profile=mcp-app", text="   "))
 mcp.add_resource(
-    TextResource(uri=HUGE_URI, name="huge", mime_type="text/html;profile=mcp-app", text="<p>" + "x" * 6_000_000)
+    TextResource(
+        uri=HUGE_URI, name="huge", mime_type="text/html;profile=mcp-app", text="<p>" + "x" * 6_000_000
+    )
 )
-
-
 
 
 def main() -> None:
@@ -193,5 +197,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -51,12 +51,16 @@ class TestToolUiResourceUri:
 
 class TestExtractUiHtml:
     def test_text(self):
-        html, meta = extract_ui_html(NS(contents=[content(meta={"ui": {"prefersBorder": True}})]), expected_uri=URI, max_bytes=100)
+        html, meta = extract_ui_html(
+            NS(contents=[content(meta={"ui": {"prefersBorder": True}})]), expected_uri=URI, max_bytes=100
+        )
         assert html == "<p>hi</p>" and meta == {"prefersBorder": True}
 
     def test_blob(self):
         blob = base64.b64encode(b"<p>blob</p>").decode()
-        html, _ = extract_ui_html(NS(contents=[content(text=None, blob=blob)]), expected_uri=URI, max_bytes=100)
+        html, _ = extract_ui_html(
+            NS(contents=[content(text=None, blob=blob)]), expected_uri=URI, max_bytes=100
+        )
         assert html == "<p>blob</p>"
 
     def test_invalid_blob(self):
@@ -69,7 +73,9 @@ class TestExtractUiHtml:
 
     def test_uri_mismatch_prevents_cross_contamination(self):
         with pytest.raises(ResourceError, match="mismatch"):
-            extract_ui_html(NS(contents=[content(uri="ui://other/app.html")]), expected_uri=URI, max_bytes=100)
+            extract_ui_html(
+                NS(contents=[content(uri="ui://other/app.html")]), expected_uri=URI, max_bytes=100
+            )
 
     @pytest.mark.parametrize("contents", [[], [content(), content()], None])
     def test_content_count(self, contents):
@@ -91,7 +97,15 @@ class TestExtractUiHtml:
 
 
 def env(**kw):
-    base = {"v": 1, "kind": "tools/call", "widget_id": "w1", "mount_id": "abc", "request_id": "abc.1", "render_id": 1, "payload": {}}
+    base = {
+        "v": 1,
+        "kind": "tools/call",
+        "widget_id": "w1",
+        "mount_id": "abc",
+        "request_id": "abc.1",
+        "render_id": 1,
+        "payload": {},
+    }
     base.update(kw)
     return base
 
@@ -128,4 +142,8 @@ def test_to_wire_strips_sdk_internal_fields():
     from mcp.types import CallToolResult, TextContent
 
     wire = to_wire(CallToolResult(content=[TextContent(type="text", text="t")], structured_content={"a": 1}))
-    assert wire == {"content": [{"type": "text", "text": "t"}], "structuredContent": {"a": 1}, "isError": False}
+    assert wire == {
+        "content": [{"type": "text", "text": "t"}],
+        "structuredContent": {"a": 1},
+        "isError": False,
+    }

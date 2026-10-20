@@ -5,6 +5,8 @@ import pytest
 from shiny_mcp_host import HostPolicy, PolicyError
 from shiny_mcp_host.policy import sanitize_csp, sanitize_permissions, tool_visibility, validate_open_link
 
+pytestmark = pytest.mark.security
+
 
 def tool(visibility=None):
     ui = {"resourceUri": "ui://x"}
@@ -14,7 +16,9 @@ def tool(visibility=None):
 
 
 def check(policy, name, *, origin="show", t=tool(), view="s1", target="s1"):
-    policy.check_app_tool_call(view_server=view, target_server=target, tool_name=name, origin_tool=origin, tool=t)
+    policy.check_app_tool_call(
+        view_server=view, target_server=target, tool_name=name, origin_tool=origin, tool=t
+    )
 
 
 class TestAppToolPolicy:
@@ -55,7 +59,11 @@ class TestAppToolPolicy:
 class TestCsp:
     declared = {
         "connectDomains": ["https://api.example.com", "javascript:alert(1)", "http://evil.example.com"],
-        "resourceDomains": ["https://cdn.example.com", "https://x.example.com; script-src *", "https://*.tiles.example"],
+        "resourceDomains": [
+            "https://cdn.example.com",
+            "https://x.example.com; script-src *",
+            "https://*.tiles.example",
+        ],
         "frameDomains": ["https://'unsafe-eval'"],
         "baseUriDomains": "https://notalist.example",
         "unknown": ["https://ignored.example"],
@@ -83,7 +91,9 @@ class TestCsp:
         assert "https://x.example.com; script-src *" in rejected
 
     def test_loopback_http_allowed(self):
-        csp, _ = sanitize_csp({"connectDomains": ["http://localhost:9000"]}, HostPolicy(trust_declared_csp=True))
+        csp, _ = sanitize_csp(
+            {"connectDomains": ["http://localhost:9000"]}, HostPolicy(trust_declared_csp=True)
+        )
         assert csp == {"connectDomains": ["http://localhost:9000"]}
 
     def test_invalid_policy_domain(self):
@@ -96,7 +106,9 @@ class TestCsp:
 
 def test_permissions():
     policy = HostPolicy(allowed_permissions=["clipboardWrite"])
-    assert sanitize_permissions({"camera": {}, "clipboardWrite": {}, "bogus": {}}, policy) == {"clipboardWrite": {}}
+    assert sanitize_permissions({"camera": {}, "clipboardWrite": {}, "bogus": {}}, policy) == {
+        "clipboardWrite": {}
+    }
     assert sanitize_permissions({"camera": {}}, HostPolicy()) == {}
     with pytest.raises(ValueError):
         HostPolicy(allowed_permissions=["usb"])
@@ -108,7 +120,16 @@ def test_open_link_ok(url):
 
 
 @pytest.mark.parametrize(
-    "url", ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,<p>", "//example.com", "", None, "https://" + "a" * 5000]
+    "url",
+    [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "data:text/html,<p>",
+        "//example.com",
+        "",
+        None,
+        "https://" + "a" * 5000,
+    ],
 )
 def test_open_link_rejected(url):
     with pytest.raises(PolicyError):

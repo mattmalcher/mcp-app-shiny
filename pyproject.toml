@@ -59,6 +59,7 @@ markers = [
   "integration: needs the fixture/demo MCP servers",
   "e2e: browser end-to-end tests (Playwright)",
   "security: security / negative tests",
+  "compat: comparison against the upstream ext-apps basic-host",
 ]
 filterwarnings = ["ignore::DeprecationWarning:shiny.*"]
 

@@ -134,8 +134,7 @@ class HostPolicy:
         if isinstance(explicit, list) and "app" in explicit:
             return
         raise PolicyError(
-            f"Tool {tool_name!r} is not authorised for this View "
-            "(add it to HostPolicy.app_tools to allow it)"
+            f"Tool {tool_name!r} is not authorised for this View (add it to HostPolicy.app_tools to allow it)"
         )
 
 
@@ -185,11 +184,7 @@ def sanitize_permissions(permissions: object, policy: HostPolicy) -> dict[str, d
     """Keep only requested permissions that the policy allows."""
     if not isinstance(permissions, Mapping):
         return {}
-    return {
-        key: {}
-        for key in PERMISSION_KEYS
-        if key in permissions and key in policy.allowed_permissions
-    }
+    return {key: {} for key in PERMISSION_KEYS if key in permissions and key in policy.allowed_permissions}
 
 
 def validate_open_link(url: object) -> str:

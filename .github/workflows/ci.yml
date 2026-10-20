@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
+      - name: Cache upstream ext-apps (basic-host)
+        uses: actions/cache@v4
+        with:
+          path: build/ext-apps
+          key: ext-apps-${{ hashFiles('scripts/setup_basic_host.sh') }}
+
+      - name: Setup
+        run: |
+          make setup
+          .venv/bin/python -m playwright install --with-deps chromium
+
+      - name: Bundled assets are up to date
+        run: git diff --exit-code -- src/shiny_mcp_host/static
+
+      - run: make lint
+      - run: make test-unit
+      - run: make test-integration
+      - run: make test-e2e
+      - run: make test-security
+      - run: make test-dist
+      - run: make test-compat
+
+      - name: Upload traces and logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/

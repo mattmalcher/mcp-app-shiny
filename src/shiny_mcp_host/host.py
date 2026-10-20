@@ -142,7 +142,7 @@ class _Widget:
     render: _Render | None = None
     status: WidgetStatus = "waiting"
     status_message: dict[str, Any] | None = None
-    tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    tasks: dict[asyncio.Task[Any], tuple[str, str]] = field(default_factory=dict)
     render_seq: int = 0
 
 
@@ -380,25 +380,29 @@ class MCPHost:
             read = asyncio.ensure_future(conn.read_resource(uri))
             done = await asyncio.gather(call, read, return_exceptions=True)
             call_out, read_out = done
-            if isinstance(read_out, BaseException):
-                if isinstance(call_out, CallToolResult):
-                    result = call_out
-                raise read_out
-            html, ui_meta = extract_ui_html(read_out, expected_uri=uri, max_bytes=self.policy.max_resource_bytes)
             cancelled: dict[str, Any] | None = None
             if isinstance(call_out, BaseException):
                 cancelled = {"reason": str(call_out) or type(call_out).__name__}
             else:
                 result = call_out
+            if isinstance(read_out, BaseException):
+                raise read_out
+            html, ui_meta = extract_ui_html(
+                read_out, expected_uri=uri, max_bytes=self.policy.max_resource_bytes
+            )
             if w.render_seq != render_id:
                 return RenderResult(widget_id, server, tool, result, uri, error="superseded")
-            message = self._render_message(render_id, server, tool_def, uri, html, ui_meta, args, result, cancelled)
+            message = self._render_message(
+                render_id, server, tool_def, uri, html, ui_meta, args, result, cancelled
+            )
             w.render = _Render(render_id, server, tool, message)
             w.status_message = None
             await self._cancel_widget_tasks(w)
             await self._set_status(w, "rendered", None)
             await self._push_render(w)
-            return RenderResult(widget_id, server, tool, result, uri, error=cancelled["reason"] if cancelled else None)
+            return RenderResult(
+                widget_id, server, tool, result, uri, error=cancelled["reason"] if cancelled else None
+            )
         except MCPHostError as e:
             await self._push_error(w, e.code, str(e), result)
             return RenderResult(widget_id, server, tool, result, uri, error=str(e))
@@ -515,7 +519,14 @@ class MCPHost:
     async def _send(self, widget_id: str, kind: str, payload: dict[str, Any], **extra: Any) -> None:
         if self._closed:
             return
-        message = {"v": 1, "host_id": self.id, "widget_id": widget_id, "kind": kind, "payload": payload, **extra}
+        message = {
+            "v": 1,
+            "host_id": self.id,
+            "widget_id": widget_id,
+            "kind": kind,
+            "payload": payload,
+            **extra,
+        }
         try:
             await self.session.send_custom_message(CUSTOM_MESSAGE_TYPE, message)
         except Exception as e:  # noqa: BLE001 - session may be closing
@@ -551,15 +562,25 @@ class MCPHost:
 
     async def _push_fallback(self, w: _Widget, server: str, tool: str, result: CallToolResult) -> None:
         w.render = None
-        payload = {"server": server, "tool": tool, "text": _result_text(result), "is_error": bool(result.is_error)}
+        payload = {
+            "server": server,
+            "tool": tool,
+            "text": _result_text(result),
+            "is_error": bool(result.is_error),
+        }
         await self._set_status(w, "rendered", {"kind": "fallback", "payload": payload})
 
     async def _cancel_widget_tasks(self, w: _Widget) -> None:
-        tasks, w.tasks = w.tasks, set()
+        """Cancel a widget's in-flight View requests and settle each one in the browser."""
+        tasks, w.tasks = w.tasks, {}
         for t in tasks:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        payload = {"ok": False, "error": {"code": "cancelled", "message": "Request cancelled"}}
+        for t, (mount_id, request_id) in tasks.items():
+            if t.cancelled():
+                await self._send(w.id, "response", payload, mount_id=mount_id, request_id=request_id)
 
     async def _on_client_message(self, raw: object) -> dict[str, Any]:
         """Entry point for every browser -> Python envelope. Must return quickly."""
@@ -634,25 +655,21 @@ class MCPHost:
         params = env.payload.get("params")
         if not isinstance(params, Mapping):
             raise MCPHostError("params must be an object")
-        if env.kind == "tools/call":
-            coro = self._view_tool_call(render, dict(params))
-        else:
-            if not self.policy.allow_resource_read:
-                raise PolicyError("resources/read is disabled by policy")
-            coro = self._view_resource_read(render, dict(params))
-        task = asyncio.create_task(self._respond(w, env, coro), name=f"mcp-view:{w.id}:{env.request_id}")
-        w.tasks.add(task)
-        task.add_done_callback(w.tasks.discard)
+        handler = self._view_tool_call if env.kind == "tools/call" else self._view_resource_read
+        if env.kind == "resources/read" and not self.policy.allow_resource_read:
+            raise PolicyError("resources/read is disabled by policy")
+        task = asyncio.create_task(
+            self._respond(w, env, lambda: handler(render, dict(params))),
+            name=f"mcp-view:{w.id}:{env.request_id}",
+        )
+        w.tasks[task] = (env.mount_id, env.request_id)
+        task.add_done_callback(lambda t: w.tasks.pop(t, None))
         return {"status": "pending"}
 
-    async def _respond(self, w: _Widget, env: Envelope, coro: Awaitable[Any]) -> None:
+    async def _respond(self, w: _Widget, env: Envelope, run: Callable[[], Awaitable[Any]]) -> None:
         try:
-            result = await coro
+            result = await run()
             payload: dict[str, Any] = {"ok": True, "result": result}
-        except asyncio.CancelledError:
-            payload = {"ok": False, "error": {"code": "cancelled", "message": "Request cancelled"}}
-            await self._send(w.id, "response", payload, mount_id=env.mount_id, request_id=env.request_id)
-            raise
         except MCPHostError as e:
             payload = {"ok": False, "error": {"code": e.code, "message": str(e)}}
         except Exception as e:  # noqa: BLE001

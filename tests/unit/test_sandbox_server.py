@@ -5,12 +5,16 @@ from starlette.testclient import TestClient
 
 from shiny_mcp_host.sandbox import build_csp_header, sandbox_app
 
+pytestmark = pytest.mark.security
+
 NONCE = "a" * 32
 
 
 @pytest.fixture
 def client():
-    return TestClient(sandbox_app(["http://127.0.0.1:*", "https://app.example.com"]), base_url="http://localhost:8765")
+    return TestClient(
+        sandbox_app(["http://127.0.0.1:*", "https://app.example.com"]), base_url="http://localhost:8765"
+    )
 
 
 def test_default_csp_is_restrictive(client):
@@ -35,7 +39,9 @@ def test_declared_csp_is_revalidated(client):
         "connectDomains": ["https://api.example.com", "https://evil; script-src *"],
         "resourceDomains": ["https://cdn.example.com"],
     }
-    r = client.get("/sandbox.html", params={"host": "https://app.example.com", "nonce": NONCE, "csp": json.dumps(csp)})
+    r = client.get(
+        "/sandbox.html", params={"host": "https://app.example.com", "nonce": NONCE, "csp": json.dumps(csp)}
+    )
     header = r.headers["content-security-policy"]
     assert "connect-src https://api.example.com" in header
     assert "script-src 'self' 'unsafe-inline' https://cdn.example.com" in header
@@ -44,7 +50,13 @@ def test_declared_csp_is_revalidated(client):
 
 @pytest.mark.parametrize(
     "host",
-    ["http://evil.example.com", "https://app.example.com.evil.com", "javascript:alert(1)", "", "http://127.0.0.1:8000/path"],
+    [
+        "http://evil.example.com",
+        "https://app.example.com.evil.com",
+        "javascript:alert(1)",
+        "",
+        "http://127.0.0.1:8000/path",
+    ],
 )
 def test_disallowed_host_origin(client, host):
     r = client.get("/sandbox.html", params={"host": host, "nonce": NONCE})

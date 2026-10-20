@@ -95,9 +95,7 @@ def get_tool_ui_resource_uri(tool: Any) -> str | None:
     raise ResourceError(f"Invalid UI resource URI: {uri!r}")
 
 
-def extract_ui_html(
-    result: Any, *, expected_uri: str, max_bytes: int
-) -> tuple[str, Mapping[str, Any]]:
+def extract_ui_html(result: Any, *, expected_uri: str, max_bytes: int) -> tuple[str, Mapping[str, Any]]:
     """Validate a ``resources/read`` result for an MCP App and return ``(html, ui_meta)``.
 
     Enforces: exactly one content item, matching URI (no cross-contamination),
