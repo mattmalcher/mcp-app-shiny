@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shiny-mcp-host"
+version = "0.1.0"
+description = "Render standards-compliant MCP Apps (interactive MCP tool UIs) inside Python Shiny, including ui.Chat."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "shiny-mcp-host contributors" }]
+keywords = ["shiny", "mcp", "model context protocol", "mcp apps", "chat"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = [
+  "shiny>=1.8,<2",
+  "shinychat>=0.7",
+  "htmltools>=0.7",
+  "mcp>=2.3,<3",
+  "starlette>=0.46",
+  "uvicorn>=0.30",
+]
+
+[project.urls]
+Homepage = "https://github.com/mattmalcher/mcp-app-shiny"
+
+[project.scripts]
+shiny-mcp-sandbox = "shiny_mcp_host.sandbox:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-timeout==2.4.0",
+  "playwright==1.56.0",
+  "ruff==0.17.1",
+  "build==1.6.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shiny_mcp_host"]
+artifacts = ["src/shiny_mcp_host/static/*"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/shiny_mcp_host", "frontend/src", "frontend/package.json", "frontend/package-lock.json", "frontend/build.mjs", "frontend/tsconfig.json", "README.md", "LICENSE", "docs"]
+artifacts = ["src/shiny_mcp_host/static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+timeout = 180
+markers = [
+  "integration: needs the fixture/demo MCP servers",
+  "e2e: browser end-to-end tests (Playwright)",
+  "security: security / negative tests",
+]
+filterwarnings = ["ignore::DeprecationWarning:shiny.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "BLE"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**" = ["E501"]
+"tests/**" = ["BLE001", "B011"]

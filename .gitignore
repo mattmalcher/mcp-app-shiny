@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# shiny-mcp-host
+frontend/node_modules/
+tests/fixtures/view.bundle.js
+test-results/
+.pytest_cache/

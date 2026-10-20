@@ -1,0 +1,28 @@
+{
+  "name": "shiny-mcp-host-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-side MCP Apps host adapter for shiny-mcp-host (bundled into the Python wheel).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "zod": "4.2.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server-basic-vanillajs": "2.0.3",
+    "esbuild": "0.25.12",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
