@@ -1,18 +1,20 @@
-# shiny-mcp-host developer commands. Requires uv; setup-dev and JS/test targets also need Node 20+.
+# shiny-mcp-host developer commands. Requires uv; setup-node and the JS targets also need Node 20+.
 PY        := .venv/bin/python
 PYTEST    := $(PY) -m pytest
 DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
-.PHONY: setup setup-dev vendor-sdk setup-compat build lint test-unit test-integration test-e2e test-security \
+.PHONY: setup setup-dev setup-node vendor-sdk setup-compat build lint test-unit test-integration test-e2e test-security \
         test-compat test-dist demo-server-bundle test demo demo-clock demo-standalone clean
 
 setup:                  ## Python env from uv.lock: all you need for `make demo` (no Node)
 	uv sync --frozen
 
-setup-dev: setup        ## + Node packages, browser builds, Playwright: for contributors and tests
-	cd frontend && npm ci --no-audit --no-fund
+setup-dev: setup        ## + Playwright Chromium: enough for the Python test suites (no Node)
 	$(PY) -m playwright install chromium || echo "(using pre-installed Playwright browsers)"
+
+setup-node:             ## Node packages + browser builds: TypeScript, Vitest, official-server tests (Node 20+)
+	cd frontend && npm ci --no-audit --no-fund
 	cd frontend && npm run build
 
 vendor-sdk:             ## re-vendor the official MCP Apps SDK (version from frontend/package.json); no Node

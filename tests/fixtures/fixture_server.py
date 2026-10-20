@@ -1,8 +1,8 @@
 """Deterministic MCP Apps fixture server for integration, e2e and security tests.
 
 Built on the Python MCP SDK's ``mcp.server.apps`` extension, with Views that
-use the official ext-apps ``App`` SDK (``view.bundle.js``, built by
-``frontend/build.mjs``). It also exposes deliberately broken resources and
+use the official ext-apps ``App`` SDK via ``shiny_mcp_host.view.app_html``
+(script: ``fixture_view.js``; no Node or build step). It also exposes deliberately broken resources and
 an instrumented "secret-admin" tool whose invocation count proves that
 rejected requests never reach the server.
 
@@ -20,8 +20,10 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.resources import TextResource
 from mcp.types import CallToolResult, TextContent
 
+from shiny_mcp_host.view import app_html
+
 HERE = Path(__file__).parent
-BUNDLE = (HERE / "view.bundle.js").read_text(encoding="utf-8")
+VIEW_JS = (HERE / "fixture_view.js").read_text(encoding="utf-8")
 
 COUNTER_URI = "ui://fixture/counter.html"
 EVIL_URI = "ui://fixture/evil.html"
@@ -35,14 +37,12 @@ COUNTERS: dict[str, int] = {"secret-admin": 0, "model-only": 0, "increment": 0, 
 
 
 def page(mode: str, body: str) -> str:
-    # The bundle is inlined; "</script" cannot occur in esbuild output strings
-    # unescaped, but guard anyway.
-    script = BUNDLE.replace("</script", "<\\/script")
-    return (
-        "<!doctype html><html><head><meta charset='utf-8'><title>Fixture</title>"
-        "<style>body{font-family:sans-serif;margin:8px}button{margin:2px}</style></head>"
-        f"<body data-mode='{mode}'>{body}<p>Connected: <span id='connected'>no</span></p>"
-        f"<p>Status: <span id='status'></span></p><script>{script}</script></body></html>"
+    return app_html(
+        title="Fixture",
+        head="<style>body{font-family:sans-serif;margin:8px}button{margin:2px}</style>",
+        body=f"{body}<p>Connected: <span id='connected'>no</span></p>"
+        "<p>Status: <span id='status'></span></p>",
+        script=f"const MODE = {mode!r};\n{VIEW_JS}",
     )
 
 
