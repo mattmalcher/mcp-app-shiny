@@ -12,13 +12,15 @@ and prerequisites first, and prints the URL to open
 `python scripts/demo.py --help` (ports via `--mcp-port`, `--app-port`,
 `--sandbox-port`).
 
-`sales_explorer/` has two parts: `server.py` is an MCP server with the
-`explore_sales` tool and its View (`view.html` plus the bundle built from
-`frontend/examples/sales-view.ts`); `app.py` is the Shiny app. The data is
-synthetic.
+`sales_explorer/` has two parts: `server.py` is an MCP server (official Python
+SDK) whose View is plain `view.html`/`view.css`/`view.js`, combined with the
+official MCP Apps SDK by `shiny_mcp_host.view.app_html()`; `app.py` is the
+Shiny app. No Node or build step. The data is synthetic.
 
-Building the View is the demo's only Node step. CI does it on every push and
-publishes `sales-explorer-mcp-server`, a self-contained server folder (with the
-prebuilt View) that runs without Node: download it from a run's Artifacts, or
-build it locally with `make demo-server-bundle`. It exposes an ASGI `app`
-(`server:app`) for hosting platforms such as Posit Connect.
+`make demo-server-bundle` (also a CI artifact, `sales-explorer-mcp-server`)
+packages the server as a self-contained folder with the View pre-rendered, so
+it needs only `mcp`. It exposes an ASGI `app` (`server:app`) for hosting
+platforms such as Posit Connect.
+
+`make demo` needs only `make setup`; `make demo-clock` and `make
+demo-standalone` run the official npm server, so they need Node (`make setup-dev`).

@@ -11,8 +11,8 @@ Hosted (ASGI):    the module-level ``app`` (e.g. on Posit Connect: entry point `
                   Set MCP_ALLOWED_HOSTS (comma-separated Host header values, e.g.
                   ``connect.example.com``) to enable DNS-rebinding protection.
 
-Needs ``view.bundle.js`` next to this file: built by ``make setup`` / ``npm run build``,
-or download the ``sales-explorer-mcp-server`` artifact from CI, which includes it.
+The View is plain HTML/CSS/JS (view.*) using the official MCP Apps SDK that
+shiny-mcp-host bundles (``shiny_mcp_host.view.app_html``); no Node or build step.
 """
 
 from __future__ import annotations
@@ -84,12 +84,19 @@ def _result(data: dict) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
 
 
-def _view_html() -> str:
-    bundle_path = HERE / "view.bundle.js"
-    if not bundle_path.exists():
-        raise SystemExit(f"{bundle_path} is missing: run `make setup` (or `cd frontend && npm run build`).")
-    bundle = bundle_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
-    return (HERE / "view.html").read_text(encoding="utf-8").replace("/*BUNDLE*/", bundle)
+def view_html() -> str:
+    """The View: view.html/.css/.js plus the official MCP Apps SDK, as one document."""
+    prebuilt = HERE / "view.built.html"  # written by scripts/package_demo_server.py
+    if prebuilt.exists():
+        return prebuilt.read_text(encoding="utf-8")
+    from shiny_mcp_host.view import app_html
+
+    return app_html(
+        title="Sales explorer",
+        head=f"<style>{(HERE / 'view.css').read_text(encoding='utf-8')}</style>",
+        body=(HERE / "view.html").read_text(encoding="utf-8"),
+        script=(HERE / "view.js").read_text(encoding="utf-8"),
+    )
 
 
 apps = Apps()
@@ -118,7 +125,7 @@ def query_sales(
     return _result(query(region, product, quarter))
 
 
-apps.add_html_resource(VIEW_URI, _view_html(), name="Sales explorer", prefers_border=True)
+apps.add_html_resource(VIEW_URI, view_html(), name="Sales explorer", prefers_border=True)
 mcp = MCPServer("Sales Explorer", version="1.0.0", extensions=[apps])
 
 

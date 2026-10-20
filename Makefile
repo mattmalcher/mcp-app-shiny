@@ -1,17 +1,22 @@
-# shiny-mcp-host developer commands. Requires: uv, Node 20+, npm.
+# shiny-mcp-host developer commands. Requires uv; setup-dev and JS/test targets also need Node 20+.
 PY        := .venv/bin/python
 PYTEST    := $(PY) -m pytest
 DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
-.PHONY: setup setup-compat build lint test-unit test-integration test-e2e test-security \
+.PHONY: setup setup-dev vendor-sdk setup-compat build lint test-unit test-integration test-e2e test-security \
         test-compat test-dist demo-server-bundle test demo demo-clock demo-standalone clean
 
-setup:                  ## reproducible Python + Node install (from uv.lock / package-lock.json)
+setup:                  ## Python env from uv.lock: all you need for `make demo` (no Node)
 	uv sync --frozen
+
+setup-dev: setup        ## + Node packages, browser builds, Playwright: for contributors and tests
 	cd frontend && npm ci --no-audit --no-fund
 	$(PY) -m playwright install chromium || echo "(using pre-installed Playwright browsers)"
 	cd frontend && npm run build
+
+vendor-sdk:             ## re-vendor the official MCP Apps SDK (version from frontend/package.json); no Node
+	$(PY) scripts/vendor_app_sdk.py
 
 setup-compat:           ## clone + build upstream ext-apps basic-host (pinned) for A15
 	./scripts/setup_basic_host.sh
@@ -49,8 +54,7 @@ test-dist: build        ## A13: install the wheel into a clean venv and check as
 	uv pip install -q -p .cache/wheel-venv dist/*.whl
 	cd /tmp && $(CURDIR)/.cache/wheel-venv/bin/python -I $(CURDIR)/scripts/check_wheel.py
 
-demo-server-bundle:     ## build the sales explorer View and package a Node-free MCP server into dist/
-	cd frontend && npm run build
+demo-server-bundle:     ## package the sales explorer as a self-contained MCP server folder in dist/
 	$(PY) scripts/package_demo_server.py
 
 test: lint test-unit test-integration test-e2e test-security test-dist test-compat

@@ -10,12 +10,12 @@ rendering, and sandboxing.
 
 ## Try it
 
-You need [uv](https://docs.astral.sh/uv/) and Node 20+ (Node builds the browser bundle).
+You need [uv](https://docs.astral.sh/uv/). No Node: the browser code ships prebuilt in the package.
 
 ```bash
 git clone https://github.com/mattmalcher/mcp-app-shiny.git
 cd mcp-app-shiny
-make setup   # Python env from uv.lock, npm ci, build the browser bundle
+make setup   # Python environment from uv.lock
 make demo
 ```
 
@@ -35,7 +35,8 @@ Then:
 4. Click **Ask about this region**. The question lands in the chat and Python answers from the selection.
 
 Ctrl+C stops everything. `make demo-clock` runs the official ext-apps "Get
-Server Time" app instead, unmodified, as a compatibility smoke test.
+Server Time" app instead, unmodified, as a compatibility smoke test; that one
+needs Node (`make setup-dev`), because the official server is an npm package.
 
 ## Use it in your app
 
@@ -93,6 +94,37 @@ host.model_context("sales")       # reactive: the latest context from one widget
 ```
 
 The full example is [`examples/sales_explorer/`](examples/sales_explorer/).
+
+## Write your own MCP App in Python
+
+An MCP App is a tool plus a `ui://` HTML page. Write the server with the
+official Python SDK, and the page with `app_html()`, which inlines the official
+MCP Apps JavaScript SDK (bundled with this package) as `McpApps`. No Node, no
+build step.
+
+```python
+from mcp.server.apps import Apps
+from mcp.server.mcpserver import MCPServer
+from shiny_mcp_host.view import app_html
+
+apps = Apps()
+
+@apps.tool(resource_uri="ui://hello/view.html", description="Say hello.")
+def hello(name: str = "world") -> str:
+    return f"Hello, {name}!"
+
+apps.add_html_resource("ui://hello/view.html", app_html(
+    body='<h1 id="greeting">…</h1>',
+    script="""
+        const app = new McpApps.App({name: "Hello", version: "1.0.0"});
+        app.ontoolresult = (r) => { greeting.textContent = r.content[0].text; };
+        app.connect();
+    """,
+))
+mcp = MCPServer("hello", extensions=[apps])   # mcp.run("streamable-http")
+```
+
+[`examples/sales_explorer/`](examples/sales_explorer/) is a fuller example.
 
 ## API
 
@@ -255,17 +287,17 @@ Then:
    It serves only a static proxy page and script, holds no data, and
    logins on the main hostname don't carry over to the alias.
 2. **Deploy the MCP server** wherever you like, including as another Connect
-   API. To try this with the sales explorer demo without Node, download the
-   `sales-explorer-mcp-server` artifact from a CI run (Actions tab → a run on
-   `main` → Artifacts): a folder with the prebuilt View that deploys as-is with
-   entry point `server:app` (for example
-   `rsconnect deploy fastapi --entrypoint server:app sales-explorer-mcp-server/`).
-   Its endpoint is `<content URL>/mcp`; set `MCP_ALLOWED_HOSTS` on the content
-   to your Connect hostname to turn on the MCP SDK's DNS-rebinding protection.
-   `make demo-server-bundle` builds the same folder locally. Only the Shiny app's Python process talks to it, so the alias doesn't
+   API. Only the Shiny app's Python process talks to it, so the alias doesn't
    matter here. If it requires a Connect login, pass an API key:
    `host.add_server("sales", url=".../mcp", headers={"Authorization": "Key …"})`.
    The key stays in Python.
+
+   To try this with the sales explorer, `make demo-server-bundle` (or the
+   `sales-explorer-mcp-server` artifact of a CI run) gives a self-contained
+   folder that needs only `mcp`. Deploy it with entry point `server:app`, for
+   example `rsconnect deploy fastapi --entrypoint server:app dist/sales-explorer-mcp-server/`.
+   Its endpoint is `<content URL>/mcp`; set `MCP_ALLOWED_HOSTS` on the content
+   to your Connect hostname to turn on the MCP SDK's DNS-rebinding protection.
 3. **Deploy the Shiny app** with the sandbox's URL **on the alias**, for
    example as an environment variable on the content:
    `SHINY_MCP_SANDBOX_URL=https://connect-sandbox.example.com/content/<sandbox-guid>/sandbox.html`.
@@ -316,8 +348,9 @@ built in.
 ## Development
 
 ```bash
-make setup             # uv sync --frozen, npm ci, build the browser bundle
+make setup-dev         # setup + npm ci, browser builds, Playwright (needs Node 20+)
 make build             # browser bundle + wheel/sdist into dist/
+make vendor-sdk        # update the bundled MCP Apps SDK from npm (Python only)
 make test              # everything below, plus lint
 make test-unit         # pytest unit + Vitest
 make test-integration  # Python host against real MCP servers
@@ -327,5 +360,8 @@ make test-compat       # same official app in the upstream ext-apps basic-host
 make test-dist         # install the wheel in a clean venv and check it
 ```
 
-Layout: `src/shiny_mcp_host/` (package; `static/` is the compiled bundle),
-`frontend/` (TypeScript), `examples/`, `tests/`, `docs/`.
+Node is only needed to change the host's TypeScript (`frontend/`) and to run
+the tests; its builds are committed to `src/shiny_mcp_host/static/`.
+
+Layout: `src/shiny_mcp_host/` (package; `static/` holds the compiled bundle and
+the vendored SDK), `frontend/` (TypeScript), `examples/`, `tests/`, `docs/`.

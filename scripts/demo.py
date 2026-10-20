@@ -68,13 +68,8 @@ def main() -> None:
 
     # Prerequisites, with the fix for each.
     if not (ROOT / "src/shiny_mcp_host/static/shiny-mcp-host.js").exists():
-        fail("Browser bundle missing. Run `make setup` first.")
+        fail("Browser bundle missing from src/shiny_mcp_host/static. Run `make setup-dev` to rebuild it.")
     if args.example == "sales":
-        if not (ROOT / "examples/sales_explorer/view.bundle.js").exists():
-            fail(
-                "Sales explorer View not built (examples/sales_explorer/view.bundle.js). Run `make setup`, "
-                "or without Node: copy view.bundle.js from CI's sales-explorer-mcp-server artifact."
-            )
         mcp_cmd = [
             sys.executable,
             str(ROOT / "examples/sales_explorer/server.py"),
@@ -83,9 +78,12 @@ def main() -> None:
         ]
     else:
         if shutil.which("node") is None:
-            fail("Node.js is required for the official demo server. Install Node 20+.")
+            fail(
+                f"The {args.example} demo runs the official ext-apps server, which needs Node 20+ "
+                "(`make demo` doesn't)."
+            )
         if not OFFICIAL_SERVER.exists():
-            fail("Official demo server not installed. Run `make setup` (npm ci in frontend/).")
+            fail("Official demo server not installed. Run `make setup-dev` (npm ci in frontend/).")
         mcp_cmd = ["node", str(OFFICIAL_SERVER)]
     for port, what, flag in [
         (args.mcp_port, "MCP server", "--mcp-port / DEMO_PORT"),

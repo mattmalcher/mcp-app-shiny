@@ -225,4 +225,3 @@ tests/fixtures/view.bundle.js
 test-results/
 .pytest_cache/
 .cache/
-examples/sales_explorer/view.bundle.js

@@ -36,11 +36,14 @@ jobs:
 
       - name: Setup
         run: |
-          make setup
+          make setup-dev
           .venv/bin/python -m playwright install --with-deps chromium
 
       - name: Bundled assets are up to date
         run: git diff --exit-code -- src/shiny_mcp_host/static
+
+      - name: Vendored MCP Apps SDK matches the pinned upstream release
+        run: .venv/bin/python scripts/vendor_app_sdk.py --check
 
       - run: make lint
       - run: make test-unit
@@ -58,28 +61,23 @@ jobs:
           path: test-results/
 
   demo-server-bundle:
-    # Builds the sales explorer View (the only Node step in the demo) and
-    # publishes a self-contained MCP server folder that runs without Node,
-    # e.g. on Posit Connect.
+    # Packages the sales explorer as a self-contained MCP server folder (View
+    # with the official SDK inlined) that runs without Node or shiny-mcp-host,
+    # e.g. on Posit Connect. Needs only Python: the SDK ships in this repo.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: astral-sh/setup-uv@v6
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Build the View bundle
-        run: |
-          cd frontend
-          npm ci --no-audit --no-fund
-          npm run build
+          enable-cache: true
+          python-version: "3.12"
 
       - name: Package the MCP server
-        run: python3 scripts/package_demo_server.py dist/sales-explorer-mcp-server
+        run: |
+          make setup
+          .venv/bin/python scripts/package_demo_server.py dist/sales-explorer-mcp-server
 
       - uses: actions/upload-artifact@v4
         with:
