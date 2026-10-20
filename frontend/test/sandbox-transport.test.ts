@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SandboxTransport } from "../src/sandbox";
+import { HostError, SandboxTransport, loadSandboxProxy } from "../src/sandbox";
 
 function dispatch(data: unknown, origin: string, source: unknown) {
   window.dispatchEvent(new MessageEvent("message", { data, origin, source: source as MessageEventSource }));
@@ -37,5 +37,24 @@ describe("SandboxTransport", () => {
     await t.close();
     await t.send({ jsonrpc: "2.0", method: "x" } as never);
     expect(posted).toHaveLength(1);
+  });
+});
+
+describe("loadSandboxProxy", () => {
+  it("reports an unresponsive proxy as sandbox_unreachable, with next steps", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const pending = loadSandboxProxy(container, {
+      sandboxUrl: "http://localhost:1/sandbox.html",
+      sandboxOrigin: "http://localhost:1",
+      csp: {},
+      title: "t",
+      timeoutMs: 20,
+      signal: new AbortController().signal,
+    });
+    const error = await pending.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HostError);
+    expect((error as HostError).code).toBe("sandbox_unreachable");
+    expect((error as HostError).message).toContain("shiny-mcp-sandbox --check");
   });
 });

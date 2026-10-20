@@ -48,7 +48,7 @@ def server(input, output, session):
             r = await host.call_and_render(
                 "fx", cmd["tool"], dict(cmd.get("args") or {}), target=cmd["target"]
             )
-            results.set({**results.get(), cmd["target"]: r.error or "ok"})
+            results.set({**results.get(), cmd["target"]: r.render_error or r.tool_error or "ok"})
         elif action == "remove":
             ui.remove_ui(selector=f"shiny-mcp-widget[data-widget-id='{cmd['target']}']")
         elif action == "insert":

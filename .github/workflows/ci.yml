@@ -54,6 +54,8 @@ jobs:
       - run: make test-security
       - run: make test-dist
       - run: make test-compat
+      - name: Posit Connect recipe, rehearsed locally (not a Connect validation)
+        run: make rehearse-connect
 
       - name: Upload traces and logs on failure
         if: failure()

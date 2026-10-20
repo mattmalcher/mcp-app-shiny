@@ -2,9 +2,10 @@
 
 | Example | Command | What it shows |
 |---|---|---|
-| [`sales_explorer/`](sales_explorer/) | `make demo` | **The showcase.** An interactive sales explorer in `ui.Chat`. The agent's existing tool result is rendered with `render_result`; filters call tools through Python; the selected region comes back as model context; the app's question is answered by Python. |
+| [`sales_explorer/`](sales_explorer/) | `make demo` | **The showcase.** An interactive sales explorer in `ui.Chat`. The agent calls the tool once and the result is rendered with `render_in_chat` (no second call); filters call tools through Python; the selected region comes back as model context; the app's question is answered by Python. |
 | [`chat/app.py`](chat/app.py) | `make demo-clock` | Smoke test: the unmodified official ext-apps "Get Server Time" app (npm `@modelcontextprotocol/server-basic-vanillajs`) in `ui.Chat`. |
 | [`standalone/app.py`](standalone/app.py) | `make demo-standalone` | The same official app in a plain `ui.page_fluid`, with outputs for `ui/message` and model context. |
+| [`posit_connect/`](posit_connect/) | `make rehearse-connect` | Deployment: the sandbox as a standalone ASGI app, plus the sales explorer packaged as three Posit Connect content items. See [docs/deployment.md](../docs/deployment.md). |
 
 Each command starts the MCP server, the sandbox and the Shiny app, checks ports
 and prerequisites first, and prints the URL to open
@@ -20,7 +21,9 @@ Shiny app. No Node or build step. The data is synthetic.
 `make demo-server-bundle` (also a CI artifact, `sales-explorer-mcp-server`)
 packages the server as a self-contained folder with the View pre-rendered, so
 it needs only `mcp`. It exposes an ASGI `app` (`server:app`) for hosting
-platforms such as Posit Connect.
+platforms such as Posit Connect. `app.py` reads `MCP_SERVER_URL`,
+`MCP_SERVER_API_KEY` and `SHINY_MCP_SANDBOX_URL`, so the same file runs
+locally and deployed.
 
 `make demo` needs only `make setup`; `make demo-clock` and `make
 demo-standalone` run the official npm server, so they need Node (`make setup-node`).

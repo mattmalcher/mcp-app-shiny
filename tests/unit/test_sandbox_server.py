@@ -160,3 +160,117 @@ def test_works_under_a_path_prefix(mode):
     assert '<script src="sandbox.js">' in r.text
     assert c.get("/content/abc/sandbox.js").status_code == 200
     assert "frame-ancestors https://connect.example.com" in r.headers["content-security-policy"]
+
+
+# ------------------------------------------------------- check_sandbox (CLI)
+
+
+@pytest.fixture
+def serve():
+    """Serve an ASGI app on a free port in a thread; returns its base URL."""
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    servers = []
+
+    def start(app) -> str:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app, port=port, log_level="warning", lifespan="off"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        while not server.started:
+            time.sleep(0.02)
+        servers.append((server, thread))
+        return f"http://localhost:{port}"
+
+    yield start
+    for server, thread in servers:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def _wrap(inner, *, extra_headers=(), redirect_to=None):
+    async def app(scope, receive, send):
+        if redirect_to and scope["type"] == "http":
+            await send(
+                {"type": "http.response.start", "status": 302, "headers": [(b"location", redirect_to)]}
+            )
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def patched(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message["headers"], *extra_headers]}
+            await send(message)
+
+        await inner(scope, receive, patched)
+
+    return app
+
+
+def _failed(checks) -> dict[str, str]:
+    return {c.name: c.detail for c in checks if not c.ok}
+
+
+APP = "http://127.0.0.1:8000"
+
+
+def test_check_sandbox_passes_for_a_correct_deployment(serve):
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    base = serve(sandbox_app([APP]))
+    checks = check_sandbox(f"{base}/sandbox.html", APP)
+    assert _failed(checks) == {}
+    assert {c.name for c in checks} >= {"reachable", "frame-ancestors", "no X-Frame-Options", "version"}
+
+
+@pytest.mark.parametrize(
+    ("wrap", "origin", "name", "needle"),
+    [
+        ({"extra_headers": [(b"x-frame-options", b"SAMEORIGIN")]}, APP, "no X-Frame-Options", "SAMEORIGIN"),
+        (
+            {"extra_headers": [(b"content-security-policy", b"frame-ancestors 'self'")]},
+            APP,
+            "frame-ancestors",
+            "extra policy",
+        ),
+        ({"redirect_to": b"https://connect.example.com/content/x/"}, APP, "reachable", "redirect"),
+        ({}, "http://127.0.0.1:9999", "reachable", "not in its allowed_host_origins"),
+    ],
+)
+def test_check_sandbox_names_each_server_side_failure(serve, wrap, origin, name, needle):
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    base = serve(_wrap(sandbox_app([APP]), **wrap))
+    failed = _failed(check_sandbox(f"{base}/sandbox.html", origin))
+    assert name in failed and needle in failed[name], failed
+
+
+def test_check_sandbox_refuses_same_origin_and_unreachable():
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    assert "distinct origin" in _failed(check_sandbox(f"{APP}/sandbox.html", APP))
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    failed = _failed(check_sandbox(f"http://localhost:{port}/sandbox.html", APP, timeout=2))
+    assert "could not connect" in failed["reachable"]
+
+
+def test_check_cli_exit_codes(serve, capsys):
+    from shiny_mcp_host.sandbox import main
+
+    base = serve(sandbox_app([APP]))
+    with pytest.raises(SystemExit) as ok:
+        main(["--check", f"{base}/sandbox.html", "--host-origin", APP])
+    assert ok.value.code == 0 and "does not prove browser embedding" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as bad:
+        main(["--check", f"{base}/sandbox.html", "--host-origin", "http://127.0.0.1:1"])
+    assert bad.value.code == 1 and "FAIL  reachable" in capsys.readouterr().out

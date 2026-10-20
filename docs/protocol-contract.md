@@ -85,8 +85,9 @@ notifications (theme switching after mount), bookmark/history restoration.
 
 ### Initial data lifecycle
 
-`render_result` renders a tool result obtained elsewhere (no second
-`tools/call`); `call_and_render` calls the tool while it fetches the resource.
+`render_result` and `render_in_chat` render an outcome obtained elsewhere (a
+result, or the error of a failed call) and never send `tools/call`;
+`call_and_render` calls the tool while it fetches the resource.
 Either way Python validates the resource, then sends a single `render`
 message. Each widget's renders are numbered, and every outcome (View, text
 fallback, error) is published through one check, so an older call that
@@ -117,7 +118,9 @@ Browser → Python, via
 ```
 
 Kinds: `mount`, `unmount`, `initialized`, `tools/call`, `resources/read`,
-`model-context`, `message`, `open-link`, `log`, `view-error`. Every envelope is
+`model-context`, `message`, `open-link`, `log`, `view-error` (payload
+`{code, message}`; codes `sandbox_config`, `sandbox_unreachable`,
+`view_init_timeout`, `view_failed`). Every envelope is
 validated (`protocol.parse_envelope`): version, kind, id formats, object
 payload. `mount_id` must be the widget's current mount and `render_id` its
 current render, otherwise the request is rejected as stale.

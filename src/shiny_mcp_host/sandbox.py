@@ -15,6 +15,12 @@ or in-process (development)::
     from shiny_mcp_host.sandbox import start_sandbox_server
     sandbox = start_sandbox_server(port=8765)
     MCPHost(session, sandbox_url=sandbox.url)
+
+Check a deployed sandbox from the command line (server and headers only; it
+cannot tell whether a browser will embed it)::
+
+    shiny-mcp-sandbox --check https://sandbox.example.com/sandbox.html \
+        --host-origin https://app.example.com
 """
 
 from __future__ import annotations
@@ -24,7 +30,9 @@ import fnmatch
 import json
 import logging
 import re
+import secrets
 import socket
+import ssl
 import threading
 import time
 import urllib.request
@@ -32,6 +40,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -42,6 +52,8 @@ from ._version import __version__
 from .policy import CSP_KEYS, _is_valid_csp_source
 
 __all__ = (
+    "check_sandbox",
+    "SandboxCheck",
     "probe_sandbox",
     "sandbox_app",
     "build_csp_header",
@@ -231,6 +243,165 @@ def probe_sandbox(host: str, port: int, timeout: float = 2.0) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class SandboxCheck:
+    """One finding of :func:`check_sandbox`."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _fetch(url: str, timeout: float) -> tuple[int, Any, bytes]:
+    """GET without following redirects: (status, headers, first bytes of body)."""
+    opener = urllib.request.build_opener(_NoRedirect)
+    request = urllib.request.Request(url, headers={"User-Agent": f"shiny-mcp-sandbox-check/{__version__}"})
+    try:
+        with opener.open(request, timeout=timeout) as r:
+            return r.status, r.headers, r.read(65536)
+    except HTTPError as e:
+        return e.code, e.headers, e.read(4096) if e.fp else b""
+
+
+def _describe_network_error(e: BaseException) -> str:
+    reason = e.reason if isinstance(e, URLError) else e
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"TLS certificate not accepted ({reason.verify_message}); is the hostname on the certificate?"
+    if isinstance(reason, ssl.SSLError):
+        return f"TLS handshake failed ({reason})"
+    if isinstance(reason, socket.gaierror):
+        return f"DNS lookup failed ({reason}); does the sandbox hostname resolve?"
+    return f"could not connect ({reason})"
+
+
+def check_sandbox(sandbox_url: str, host_origin: str, *, timeout: float = 10.0) -> list[SandboxCheck]:
+    """Check a deployed sandbox from the server side, as far as HTTP allows.
+
+    Verifies that ``sandbox_url`` is on a different origin than ``host_origin``
+    (the Shiny app's origin as browsers see it), answers directly (no redirect,
+    no login page) over working TLS, is a shiny-mcp-host sandbox, allows
+    ``host_origin`` to embed it, and carries no header that would stop a
+    browser from framing it (``X-Frame-Options``, an extra
+    ``frame-ancestors``). Passing does **not** prove a browser can embed it
+    (cookies, extensions, network paths and browser policy are not visible
+    here): confirm with a rendered widget reaching ``data-state="ready"``.
+    """
+    checks: list[SandboxCheck] = []
+
+    def add(name: str, ok: bool, detail: str) -> bool:
+        checks.append(SandboxCheck(name, ok, detail))
+        return ok
+
+    parts = urlsplit(sandbox_url)
+    host = urlsplit(host_origin)
+    sandbox_origin = f"{parts.scheme}://{parts.netloc}".lower()
+    host_origin = f"{host.scheme}://{host.netloc}".lower()
+    if not add(
+        "url",
+        parts.scheme in ("http", "https") and bool(parts.netloc) and parts.path.endswith("/sandbox.html"),
+        f"{sandbox_url} (expected an http(s) URL ending in /sandbox.html)",
+    ):
+        return checks
+    if not add(
+        "distinct origin",
+        sandbox_origin != host_origin,
+        f"sandbox {sandbox_origin} vs app {host_origin}; they must differ (use a second hostname)",
+    ):
+        return checks
+    if (parts.hostname or "") == (host.hostname or ""):
+        add("distinct hostname", False, "only the port differs: cookies are shared across ports")
+    if host.scheme == "https":
+        add("https", parts.scheme == "https", "an https app can only embed an https sandbox")
+
+    nonce = secrets.token_urlsafe(16)
+    page = f"{sandbox_url}?{urlencode({'host': host_origin, 'nonce': nonce})}"
+    try:
+        status, headers, body = _fetch(page, timeout)
+    except (URLError, OSError) as e:
+        add("reachable", False, f"{sandbox_url}: {_describe_network_error(e)}")
+        return checks
+    location = headers.get("Location") if headers else None
+    if 300 <= status < 400:
+        add(
+            "reachable",
+            False,
+            f"HTTP {status} redirect to {location!r}. The sandbox hostname must serve the page itself; "
+            "a redirect (to the main hostname or a login page) defeats the separate origin.",
+        )
+        return checks
+    text = body.decode("utf-8", "replace")
+    if status == 403 and "Embedding origin not allowed" in text:
+        add(
+            "reachable",
+            False,
+            f"HTTP 403 from the sandbox: {host_origin} is not in its allowed_host_origins "
+            "(SHINY_APP_ORIGIN for the Connect example).",
+        )
+        return checks
+    if status in (401, 403):
+        add(
+            "reachable",
+            False,
+            f"HTTP {status}: the sandbox requires authentication. Browsers carry no login to the "
+            "sandbox hostname; give it anonymous access (it holds no data).",
+        )
+        return checks
+    if not add("reachable", status == 200, f"HTTP {status} from {sandbox_url}"):
+        return checks
+    add(
+        "is sandbox page",
+        '<script src="sandbox.js"></script>' in text,
+        "response is the shiny-mcp-host sandbox page" if "sandbox.js" in text else "unexpected body",
+    )
+
+    policies = headers.get_all("Content-Security-Policy") or []
+    ancestors = [
+        d.strip() for p in policies for d in p.split(";") if d.strip().lower().startswith("frame-ancestors")
+    ]
+    ours = f"frame-ancestors {host_origin}"
+    add(
+        "frame-ancestors",
+        ours in ancestors and all(host_origin in a or "*" in a for a in ancestors),
+        f"CSP frame-ancestors directives: {ancestors or 'none'}; every one must allow {host_origin}"
+        + (" (an extra policy, e.g. from a proxy, blocks embedding)" if len(ancestors) > 1 else ""),
+    )
+    add(
+        "restrictive CSP",
+        any("default-src 'none'" in p and "connect-src 'none'" in p for p in policies),
+        "default-src 'none' and connect-src 'none' by default" if policies else "no CSP header",
+    )
+    xfo = headers.get("X-Frame-Options")
+    add("no X-Frame-Options", xfo is None, f"X-Frame-Options: {xfo}" if xfo else "absent")
+
+    try:
+        status, headers, _ = _fetch(urljoin(sandbox_url, "sandbox.js"), timeout)
+        ctype = headers.get("Content-Type", "") if headers else ""
+        add(
+            "sandbox.js",
+            status == 200 and "javascript" in ctype,
+            f"HTTP {status}, {ctype or 'no content type'}",
+        )
+    except (URLError, OSError) as e:
+        add("sandbox.js", False, _describe_network_error(e))
+    try:
+        status, _, body = _fetch(urljoin(sandbox_url, "healthz"), timeout)
+        data = json.loads(body) if status == 200 else {}
+        version = data.get("version") if isinstance(data, dict) else None
+        add(
+            "version",
+            isinstance(data, dict) and data.get("service") == SERVICE_NAME,
+            f"shiny-mcp-host sandbox {version}" if version else f"HTTP {status} from healthz",
+        )
+    except (URLError, OSError, ValueError) as e:
+        add("version", False, str(e))
+    return checks
+
+
 def start_sandbox_server(
     port: int = 8765,
     *,
@@ -284,7 +455,9 @@ def start_sandbox_server(
 def main(argv: Sequence[str] | None = None) -> None:
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Serve the shiny-mcp-host sandbox proxy.")
+    parser = argparse.ArgumentParser(
+        description="Serve the shiny-mcp-host sandbox proxy, or --check a deployed one."
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -294,7 +467,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Shiny app origin allowed to embed the sandbox (repeatable; supports '*' "
         f"port wildcards). Default: {' '.join(DEFAULT_HOST_ORIGINS)}",
     )
+    parser.add_argument(
+        "--check",
+        metavar="SANDBOX_URL",
+        help="Instead of serving, check a deployed sandbox (.../sandbox.html) from the server side: "
+        "reachability, redirects, TLS and embedding headers. Needs --host-origin.",
+    )
+    parser.add_argument(
+        "--host-origin", help="With --check: the Shiny app's origin, e.g. https://app.example.com"
+    )
     args = parser.parse_args(argv)
+    if args.check:
+        if not args.host_origin:
+            parser.error("--check needs --host-origin")
+        checks = check_sandbox(args.check, args.host_origin)
+        for c in checks:
+            print(f"{'PASS' if c.ok else 'FAIL'}  {c.name}: {c.detail}")
+        ok = all(c.ok for c in checks)
+        print(
+            "\nServer-side checks passed. This does not prove browser embedding: confirm that a "
+            'rendered widget reaches data-state="ready".'
+            if ok
+            else "\nServer-side checks failed; see docs/posit-connect-validation.md#failure-diagnosis."
+        )
+        raise SystemExit(0 if ok else 1)
     logging.basicConfig(level=logging.INFO)
     uvicorn.run(sandbox_app(args.origins or DEFAULT_HOST_ORIGINS), host=args.host, port=args.port)
 

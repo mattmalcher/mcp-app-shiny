@@ -5,7 +5,8 @@ DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
 .PHONY: setup setup-dev setup-node vendor-sdk setup-compat build lint test-unit test-integration test-e2e test-security \
-        test-compat test-dist demo-server-bundle test demo demo-clock demo-standalone clean
+        test-compat test-dist demo-server-bundle connect-bundles rehearse-connect test demo demo-clock \
+        demo-standalone clean
 
 setup:                  ## Python env from uv.lock: all you need for `make demo` (no Node)
 	uv sync --frozen
@@ -59,6 +60,12 @@ test-dist: build        ## A13: install the wheel into a clean venv and check as
 demo-server-bundle:     ## package the sales explorer as a self-contained MCP server folder in dist/
 	$(PY) scripts/package_demo_server.py
 
+connect-bundles:        ## the three Posit Connect deployment folders in dist/connect (docs/deployment.md)
+	$(PY) scripts/package_connect.py
+
+rehearse-connect: connect-bundles  ## run those folders locally from clean venvs, then scripts/check_deployment.py
+	$(PY) scripts/rehearse_connect.py
+
 test: lint test-unit test-integration test-e2e test-security test-dist test-compat
 
 demo:                   ## sales explorer showcase: MCP server + sandbox + Shiny chat app on http://127.0.0.1:8000
@@ -71,4 +78,4 @@ demo-standalone:        ## official "Get Server Time" app in a plain Shiny page
 	$(PY) scripts/demo.py standalone
 
 clean:
-	rm -rf dist build test-results .cache/wheel-venv .pytest_cache
+	rm -rf dist build test-results .cache/wheel-venv .cache/connect-rehearsal .pytest_cache
