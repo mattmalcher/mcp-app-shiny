@@ -678,3 +678,56 @@ async def test_stale_error_does_not_overwrite(env):
     assert (await older).error == "superseded"
     assert session.of("error") == []
     assert session.of("render")[-1]["payload"]["tool_result"]["structuredContent"] == {"count": 2}
+
+
+async def test_packaged_demo_server_runs_without_the_repo(tmp_path):
+    """The CI artifact: a folder deployable on its own, served via its ASGI `app`."""
+    import subprocess
+    import sys
+
+    from tests import procs
+
+    sys.path.insert(0, str(procs.ROOT / "scripts"))
+    from package_demo_server import package  # type: ignore[import-not-found]
+
+    folder = package(tmp_path / "sales-explorer-mcp-server")
+    port = procs.free_port()
+    proc = procs.Proc(
+        "packaged-sales-server",
+        [sys.executable, "-I", "-m", "uvicorn", "server:app", "--port", str(port)],
+        port,
+        env={"MCP_ALLOWED_HOSTS": f"127.0.0.1:{port}"},
+        cwd=folder,
+    )
+    session = FakeSession()
+    host = MCPHost(session, sandbox_url=SANDBOX)  # type: ignore[arg-type]
+    host.add_server("sales", url=f"http://127.0.0.1:{port}/mcp")
+    try:
+        await mount(host, session, "w")
+        out = await host.call_and_render("sales", "explore_sales", {"quarter": "Q3"}, target="w")
+        assert out.ok and out.result.structured_content["filters"]["quarter"] == "Q3"
+        msg = await session.wait_for(lambda m: m["kind"] == "render")
+        assert "query_sales" in msg["payload"]["resource"]["html"]  # bundle inlined
+        # DNS-rebinding protection rejects an unexpected Host header.
+        r = subprocess.run(
+            [
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-H",
+                "Host: evil.example",
+                "-X",
+                "POST",
+                f"http://127.0.0.1:{port}/mcp",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert r.stdout.startswith("4"), r.stdout
+    finally:
+        await host.close()
+        proc.stop()

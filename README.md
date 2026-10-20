@@ -255,7 +255,14 @@ Then:
    It serves only a static proxy page and script, holds no data, and
    logins on the main hostname don't carry over to the alias.
 2. **Deploy the MCP server** wherever you like, including as another Connect
-   API. Only the Shiny app's Python process talks to it, so the alias doesn't
+   API. To try this with the sales explorer demo without Node, download the
+   `sales-explorer-mcp-server` artifact from a CI run (Actions tab → a run on
+   `main` → Artifacts): a folder with the prebuilt View that deploys as-is with
+   entry point `server:app` (for example
+   `rsconnect deploy fastapi --entrypoint server:app sales-explorer-mcp-server/`).
+   Its endpoint is `<content URL>/mcp`; set `MCP_ALLOWED_HOSTS` on the content
+   to your Connect hostname to turn on the MCP SDK's DNS-rebinding protection.
+   `make demo-server-bundle` builds the same folder locally. Only the Shiny app's Python process talks to it, so the alias doesn't
    matter here. If it requires a Connect login, pass an API key:
    `host.add_server("sales", url=".../mcp", headers={"Authorization": "Key …"})`.
    The key stays in Python.

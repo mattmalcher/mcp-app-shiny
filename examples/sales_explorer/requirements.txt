@@ -1,0 +1,2 @@
+# For deploying server.py on its own (e.g. Posit Connect). The Shiny app needs shiny-mcp-host instead.
+mcp==2.3.0

@@ -16,3 +16,9 @@ and prerequisites first, and prints the URL to open
 `explore_sales` tool and its View (`view.html` plus the bundle built from
 `frontend/examples/sales-view.ts`); `app.py` is the Shiny app. The data is
 synthetic.
+
+Building the View is the demo's only Node step. CI does it on every push and
+publishes `sales-explorer-mcp-server`, a self-contained server folder (with the
+prebuilt View) that runs without Node: download it from a run's Artifacts, or
+build it locally with `make demo-server-bundle`. It exposes an ASGI `app`
+(`server:app`) for hosting platforms such as Posit Connect.

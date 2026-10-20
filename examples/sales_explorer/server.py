@@ -4,16 +4,26 @@ Tools:
 - ``explore_sales`` (UI): opens the explorer, optionally pre-filtered.
 - ``query_sales`` (app-only): the View calls it through the host when filters change.
 
-Data is synthetic and deterministic. Run: python examples/sales_explorer/server.py --port 3001
+Data is synthetic and deterministic.
+
+Run locally:      python examples/sales_explorer/server.py --port 3001
+Hosted (ASGI):    the module-level ``app`` (e.g. on Posit Connect: entry point ``server:app``).
+                  Set MCP_ALLOWED_HOSTS (comma-separated Host header values, e.g.
+                  ``connect.example.com``) to enable DNS-rebinding protection.
+
+Needs ``view.bundle.js`` next to this file: built by ``make setup`` / ``npm run build``,
+or download the ``sales-explorer-mcp-server`` artifact from CI, which includes it.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from mcp.server.apps import Apps
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 
 HERE = Path(__file__).parent
@@ -110,6 +120,20 @@ def query_sales(
 
 apps.add_html_resource(VIEW_URI, _view_html(), name="Sales explorer", prefers_border=True)
 mcp = MCPServer("Sales Explorer", version="1.0.0", extensions=[apps])
+
+
+def asgi_app():
+    """Streamable HTTP endpoint at ``/mcp``, stateless so any worker can serve any request."""
+    hosts = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    security = (
+        TransportSecuritySettings(allowed_hosts=hosts)
+        if hosts
+        else TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    )
+    return mcp.streamable_http_app(stateless_http=True, transport_security=security, host="0.0.0.0")
+
+
+app = asgi_app()
 
 
 def main() -> None:

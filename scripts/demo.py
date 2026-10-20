@@ -71,7 +71,10 @@ def main() -> None:
         fail("Browser bundle missing. Run `make setup` first.")
     if args.example == "sales":
         if not (ROOT / "examples/sales_explorer/view.bundle.js").exists():
-            fail("Sales explorer View not built. Run `make setup` (or `cd frontend && npm run build`).")
+            fail(
+                "Sales explorer View not built (examples/sales_explorer/view.bundle.js). Run `make setup`, "
+                "or without Node: copy view.bundle.js from CI's sales-explorer-mcp-server artifact."
+            )
         mcp_cmd = [
             sys.executable,
             str(ROOT / "examples/sales_explorer/server.py"),

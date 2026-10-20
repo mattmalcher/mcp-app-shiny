@@ -5,7 +5,7 @@ DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
 .PHONY: setup setup-compat build lint test-unit test-integration test-e2e test-security \
-        test-compat test-dist test demo demo-clock demo-standalone clean
+        test-compat test-dist demo-server-bundle test demo demo-clock demo-standalone clean
 
 setup:                  ## reproducible Python + Node install (from uv.lock / package-lock.json)
 	uv sync --frozen
@@ -48,6 +48,10 @@ test-dist: build        ## A13: install the wheel into a clean venv and check as
 	uv venv -q -p 3.11 .cache/wheel-venv
 	uv pip install -q -p .cache/wheel-venv dist/*.whl
 	cd /tmp && $(CURDIR)/.cache/wheel-venv/bin/python -I $(CURDIR)/scripts/check_wheel.py
+
+demo-server-bundle:     ## build the sales explorer View and package a Node-free MCP server into dist/
+	cd frontend && npm run build
+	$(PY) scripts/package_demo_server.py
 
 test: lint test-unit test-integration test-e2e test-security test-dist test-compat
 
