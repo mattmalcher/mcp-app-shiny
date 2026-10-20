@@ -13,11 +13,12 @@ pieces talk to each other.
 | Official demo server `@modelcontextprotocol/server-basic-vanillajs` | `2.0.3` (npm, unmodified) |
 | Python MCP SDK `mcp` | `2.3.0` |
 | `shiny` / `shinychat` | `1.8.0` / `0.7.2` |
-| Node / Python | Node 22.22; Python 3.12 (tests), 3.11 (clean wheel install) |
+| Node / Python | Node 22.22; Python 3.12 (CI tests), 3.13 (also tested), 3.11 (clean wheel install and Connect bundle rehearsal) |
 | Playwright (Python) / Chromium | `1.56.0` / 141 |
 
 Exact Python versions are pinned in `uv.lock`, JavaScript versions in
-`frontend/package-lock.json`.
+`frontend/package-lock.json`. Where the browser files in the package come from
+is described in `src/shiny_mcp_host/static/README.md`.
 
 ## Upstream SDK symbols used
 
@@ -195,7 +196,7 @@ Development: Shiny on `http://127.0.0.1:8000`, sandbox on
 `sandbox_app()` from a dedicated domain (e.g.
 `https://mcp-sandbox.example-usercontent.com`) over HTTPS, pass that
 `sandbox_url`, and set `allowed_host_origins` to your app's exact origin(s).
-An HTTPS app requires an HTTPS sandbox.
+An HTTPS app requires an HTTPS sandbox. See [deployment.md](deployment.md).
 
 ### Without a second hostname
 

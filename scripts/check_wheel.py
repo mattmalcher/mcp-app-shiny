@@ -19,7 +19,13 @@ from shiny_mcp_host.sandbox import sandbox_app
 
 pkg = Path(shiny_mcp_host.__file__).parent
 assert "site-packages" in str(pkg), f"not testing an installed package: {pkg}"
-for name in ("shiny-mcp-host.js", "shiny-mcp-host.css", "sandbox.js", "mcp-app-sdk.js"):
+for name in (
+    "shiny-mcp-host.js",
+    "shiny-mcp-host.css",
+    "sandbox.js",
+    "mcp-app-sdk.js",
+    "THIRD_PARTY_LICENSES.md",
+):
     f = pkg / "static" / name
     assert f.is_file() and f.stat().st_size > 500, f"missing static asset {f}"
 

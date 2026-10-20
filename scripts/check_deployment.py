@@ -2,11 +2,13 @@
 
     python scripts/check_deployment.py --app-url URL --sandbox-url URL [--mcp-url URL] [options]
 
-Runs, in order, and reports each check as PASS/FAIL:
+Runs, in order, and reports each check as PASS, FAIL or INCONCLUSIVE:
 
 1. server   : the sandbox from the server side (shiny_mcp_host.sandbox.check_sandbox):
               reachability, redirects, TLS, frame-ancestors / X-Frame-Options.
-              Optionally the MCP server: reachable with credentials, refused without.
+              Optionally the MCP server: reachable with MCP_API_KEY; and, with a key,
+              an unauthenticated request must get 401/403 or a login redirect (any
+              other answer, e.g. a timeout or 5xx, is INCONCLUSIVE, not a pass).
 2. browser  : in Chromium, the Shiny app loads, the explorer renders in a chat reply
               (widget data-state="ready"), a filter change re-queries through Python,
               a region selection reaches Python, and the follow-up chat message is
@@ -19,7 +21,8 @@ Server checks passing while browser checks fail points at the browser side (fram
 headers seen only by browsers, mixed content, login redirects inside the frame).
 Writes evidence (sanitized headers, versions, results, screenshots) to --evidence-dir.
 Exit code 0 only if every check passed; INCONCLUSIVE counts as not passed. The evidence
-file is written even when a stage crashes (the crash is recorded as a failed check).
+file is written even when a stage crashes (the crash is recorded as a failed check)
+or the run is interrupted ("completed": false, never "passed": true).
 Credentials are read from the environment (APP_API_KEY, MCP_API_KEY) and never
 written to the evidence.
 

@@ -65,6 +65,19 @@ formats, supported MCP Apps features and pinned versions are in
 - **`ServerConnection`** (`client.py`) wraps one `mcp.Client` with timeouts
   and error mapping. **`HostPolicy`** (`policy.py`) holds the authorisation
   rules. **`protocol.py`** validates browser envelopes and UI resources.
+  **`sandbox.py`** serves the sandbox proxy and diagnoses deployed ones.
+
+## Who owns what in the browser
+
+The TypeScript in `frontend/src/` is bundled with esbuild into
+`src/shiny_mcp_host/static/` and committed, so users never need Node:
+`host.ts` (the `<shiny-mcp-widget>` element and its `AppBridge`),
+`shiny-transport.ts` (the correlated Shiny RPC), `sandbox.ts` (loading the
+proxy, the origin-checking transport) and `validation.ts` (shared checks)
+become `shiny-mcp-host.js`; `sandbox-proxy.ts` becomes `sandbox.js`. The
+official App SDK that Views use is vendored separately as `mcp-app-sdk.js`.
+[`static/README.md`](../src/shiny_mcp_host/static/README.md) lists every file,
+its origin and license.
 
 ## Render lifecycle
 
@@ -79,7 +92,9 @@ formats, supported MCP Apps features and pinned versions are in
 5. The browser loads the sandbox proxy, waits for its nonce-bound ready
    signal, connects the `AppBridge`, sends the HTML, waits for the View's
    `initialized`, then sends tool input and result (or cancellation) once
-   each. It then reports `initialized` to Python (`widget_status`).
+   each. It then reports `initialized` to Python (`widget_status`). If the
+   sandbox or the View fails, the element shows the error with a
+   `data-error-code` and Python's status becomes `error`.
 
 Re-rendering, unmounting, `remove_widget` and session end cancel the
 widget's in-flight View requests and settle them in the browser.

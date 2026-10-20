@@ -13,8 +13,8 @@ make test-e2e          # Shiny apps in Playwright (Chromium)
 make test-security     # every test marked `security`
 make test-compat       # same official app in the upstream ext-apps basic-host
 make test-dist         # build the wheel, install it in a clean venv and check it
-make test              # all of the above
-make build             # browser bundle + wheel/sdist into dist/
+make test              # all of the above (CI also runs `make rehearse-connect`)
+make build             # browser bundle + wheel/sdist into dist/ (needs Node)
 make vendor-sdk        # update the bundled MCP Apps SDK from npm (Python only)
 make connect-bundles   # Posit Connect deployment folders in dist/connect
 make rehearse-connect  # run them locally from clean venvs + scripts/check_deployment.py
@@ -22,8 +22,9 @@ make rehearse-connect  # run them locally from clean venvs + scripts/check_deplo
 
 Node is needed to change the host's TypeScript (`frontend/`, whose builds are
 committed to `src/shiny_mcp_host/static/`; CI fails if they are stale), for
-Vitest and lint's type check, and for the tests that run the official npm
-demo server or upstream basic-host. Without it the official-server tests skip
+Vitest and lint's type check (so for `make lint`, `make test-unit` and
+`make build`), and for the tests that run the official npm demo server or
+upstream basic-host. Without it the official-server tests skip
 (set `REQUIRE_OFFICIAL=1` to make them fail instead).
 
 ## Layout
@@ -31,7 +32,7 @@ demo server or upstream basic-host. Without it the official-server tests skip
 | Path | |
 |---|---|
 | `src/shiny_mcp_host/` | The package. `host.py` (`MCPHost`), `_widgets.py` (per-widget state), `client.py` (MCP connections), `policy.py`, `protocol.py`, `sandbox.py`, `view.py` (`app_html`), `components.py` (`mcp_widget`) |
-| `src/shiny_mcp_host/static/` | Compiled browser bundle and the vendored MCP Apps SDK |
+| `src/shiny_mcp_host/static/` | Generated browser bundles, their third-party license texts, and the vendored MCP Apps SDK; [its README](../src/shiny_mcp_host/static/README.md) says where each file comes from |
 | `frontend/` | TypeScript for the browser adapter and sandbox proxy |
 | `examples/` | Runnable examples; see [examples/README.md](../examples/README.md) |
 | `tests/` | `unit/`, `integration/` (real MCP servers, simulated browser), `e2e/` (Playwright) |

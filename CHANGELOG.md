@@ -70,6 +70,13 @@
 - The sales explorer example reads `SHINY_MCP_SANDBOX_URL` (deployed sandbox)
   and `MCP_SERVER_API_KEY` (sent as `Authorization: Key …`, Python-side only).
 
+- `src/shiny_mcp_host/static/README.md` says where each shipped browser file
+  comes from (generated from `frontend/`, or vendored from npm) and how to
+  regenerate it. `frontend/build.mjs` now also writes
+  `static/THIRD_PARTY_LICENSES.md` with the license text of every npm package
+  bundled into `shiny-mcp-host.js` and `sandbox.js`; previously the bundles
+  kept only one license comment. The wheel check requires the file.
+
 ### Internal
 
 - Per-widget state (records, render ordering, reactive status and model

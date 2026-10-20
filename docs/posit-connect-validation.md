@@ -44,7 +44,7 @@ what Connect does differently.
 |---|---|---|
 | Connect server URL and a **publisher** API key | `curl -s -H "Authorization: Key $CONNECT_API_KEY" "$CONNECT_SERVER/__api__/v1/user"` returns your user with `"user_role": "publisher"` or `"administrator"` | Ask the Connect administrator |
 | Connect runs Python ASGI APIs (the "FastAPI" content type) and Shiny for Python, with Python ≥ 3.11 | The Python versions offered in the dashboard's publishing docs, or the first deploy's log (rsconnect reports a missing match) | Administrator: install Python ≥ 3.11 |
-| **Sandbox alias**: a second DNS name for the same server, e.g. `connect-sandbox.example.com` | `getent hosts connect-sandbox.example.com` resolves; `curl -sI https://connect-sandbox.example.com/` answers | Administrator: DNS record, see below |
+| **Sandbox alias**: a second hostname routed to the same server, e.g. `connect-sandbox.example.com` (DNS alias, or a load-balancer rule that forwards it) | `getent hosts connect-sandbox.example.com` resolves; `curl -sI https://connect-sandbox.example.com/` answers | Administrator: DNS record, see below |
 | TLS certificate covering the alias | `curl -sv https://connect-sandbox.example.com/ -o /dev/null 2>&1 \| grep -i "subject\|SSL certificate verify"` | Administrator: add the name to the certificate (or the proxy's) |
 | Connect serves content on the alias **without redirecting** to the main name | step 4 below (`--check` reports redirects) | Administrator: Connect's `Server.Address` / proxy rules may force a canonical host; the alias must be allowed to serve content as-is |
 | Tooling | `pip install rsconnect-python`; `make setup-dev` (Python, Playwright, Chromium; no Node) | |
@@ -61,6 +61,8 @@ export CONNECT_API_KEY=...                                  # publisher key
 Administrator configuration this recipe may need (record what was required):
 
 - the alias in DNS and on the TLS certificate;
+- behind a load balancer (e.g. an AWS ALB), a listener rule that forwards the
+  alias to Connect's target group, not a redirect rule;
 - no redirect from the alias to the main hostname for `/content/...`;
 - no `X-Frame-Options` / `Content-Security-Policy: frame-ancestors` added by
   Connect or a proxy to the sandbox content (the sandbox sets its own);
@@ -74,7 +76,7 @@ Build from a clean checkout of the revision under test:
 git rev-parse HEAD
 make setup-dev
 make connect-bundles          # dist/connect/{mcp-server,sandbox,shiny-app}, dist/connect/REVISION
-make rehearse-connect         # optional but recommended: the local baseline, must pass first
+make rehearse-connect         # recommended local baseline; if you run it, it must pass before deploying
 ```
 
 | Item | Directory | Entry point | Maintained source |
@@ -115,7 +117,7 @@ to what the browser's address bar shows for the app (scheme + host + port).
 
 Access can be changed in the dashboard (content → Access) or with the
 Connect API, e.g.
-`curl -X PATCH -H "Authorization: Key $CONNECT_API_KEY" "$CONNECT_SERVER/__api__/v1/content/<guid>" -d '{"access_type": "all"}'`
+`curl -X PATCH -H "Authorization: Key $CONNECT_API_KEY" -H "Content-Type: application/json" "$CONNECT_SERVER/__api__/v1/content/<guid>" -d '{"access_type": "all"}'`
 (`all` = anyone, `logged_in`, `acl`).
 
 ## 4. Infrastructure checks (server side)
@@ -127,12 +129,13 @@ SANDBOX_URL=$SANDBOX_HOST/content/<sandbox-guid>/sandbox.html
 
 Every line must be `PASS`; `INCONCLUSIVE` means the check could not decide
 (for example a `frame-ancestors` source with a path, which it does not model)
-and counts as not passed until confirmed in a browser. It covers: the alias resolves and its TLS
-certificate verifies; `sandbox.html` answers `200` **without a redirect** and
-without asking for a login; the response is the shiny-mcp-host sandbox page
-with the restrictive CSP and `frame-ancestors $CONNECT_SERVER`; there is no
-`X-Frame-Options` and no second `frame-ancestors` policy; `sandbox.js` and
-`healthz` are served under the same prefix.
+and counts as not passed until confirmed in a browser. It covers: the alias
+resolves and its TLS certificate verifies; `sandbox.html` answers `200`
+**without a redirect** and without asking for a login; the response is the
+shiny-mcp-host sandbox page with the restrictive CSP; every `frame-ancestors`
+policy on the response (including any a proxy adds) allows `$CONNECT_SERVER`;
+there is no `X-Frame-Options`; `sandbox.js` and `healthz` are served under the
+same prefix.
 
 Also record, sanitized (no cookies, no keys):
 

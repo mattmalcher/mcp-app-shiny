@@ -6,8 +6,10 @@ MCP App Views run in a sandbox that must be served from a **different
 origin** than your Shiny app, and in production from a different
 **hostname**: cookies are shared across ports, and a different path on the
 same hostname (`/content/sandbox/` next to `/content/my-app/`) is the same
-origin. A DNS alias of the same server is enough; it is a second **name**, not
-a second server.
+origin. A second name routed to the same server is enough (a DNS alias, or a
+load-balancer rule that *forwards* that name to the server; a *redirect*
+does not work, because the browser ends up back on the main hostname). It is
+a second **name**, not a second server.
 
 The MCP server and the Shiny app have no such requirement. Only the sandbox
 needs its own hostname, because it keeps third-party HTML away from your
@@ -41,7 +43,8 @@ sandbox through a second hostname:
 | Shiny app | Shiny, `app:app` | `https://connect.example.com/content/<app-guid>/` |
 
 `connect.example.com` is your Connect server; `connect-sandbox.example.com`
-is the alias. Vanity URLs work too; use whatever URL users' browsers see.
+is the alias. Vanity URLs should work too (not yet tried); use whatever URL
+users' browsers see.
 
 Three items is the baseline, not a browser requirement: isolation needs the
 sandbox on its own hostname, not in its own process. Serving the Shiny app and
@@ -53,11 +56,13 @@ records it as the next step.
 ### 0. Ask your administrator for the alias
 
 - a DNS name (e.g. `connect-sandbox.example.com`) pointing at the Connect
-  server (or the proxy in front of it),
+  server (or the proxy in front of it); behind a load balancer such as an AWS
+  ALB, a listener rule for that host that **forwards** to Connect's target
+  group (not a redirect rule),
 - that name on the TLS certificate,
 - Connect (and any proxy) serving content under that name **without
   redirecting** to the main hostname, and without adding `X-Frame-Options` or
-  a `frame-ancestors` policy to the sandbox's responses.
+  a `frame-ancestors` policy that excludes the app to the sandbox's responses.
 
 ### 1. Build the three folders
 
@@ -150,11 +155,13 @@ complete set of checks (server, browser, isolation, with evidence) see
 | Explorer renders, filter re-queries, selection reaches Python, follow-up answered | ✅ (Chromium) | pending |
 | View cannot reach the page, cookies or network; unauthorised tool call refused | ✅ | pending |
 | Sandbox works under a path prefix (`/content/<guid>/`) | ✅ (unit test) | pending |
+| A load balancer in front of Connect (e.g. an AWS ALB) forwards the alias rather than redirecting | — | **assumption** (check your rules) |
 | Connect serves content on the alias without redirecting | — | **assumption** |
 | Connect adds no `X-Frame-Options` / `frame-ancestors` to the sandbox | — | **assumption** |
 | Connect installs a wheel referenced as `./…whl` in `requirements.txt` | — | **assumption** |
 | `MCP_ALLOWED_HOSTS=connect.example.com` matches the Host header the MCP server sees behind Connect | — | **assumption** |
 | An API key in `Authorization: Key …` authenticates the Shiny app to the MCP server | — | **assumption** |
+| Without a key, Connect refuses the MCP server with 401/403 (or a login redirect) | — | **assumption** |
 | Shiny's websocket works for the app (standard Connect behaviour) | — | **assumption** |
 
 Update this table when the runbook has been run.

@@ -29,14 +29,16 @@ region**: Python answers from the selection. Ctrl+C stops everything.
 Not on PyPI yet. Install from a checkout:
 
 ```bash
-pip install path/to/mcp-app-shiny        # or: make build && pip install dist/*.whl
+pip install path/to/mcp-app-shiny        # or a wheel: uv build --wheel, then pip install dist/*.whl
 ```
 
 Requires Python 3.11+. Installs Shiny and the MCP Python SDK; no Node.
 
 > **Deploying? The sandbox needs its own hostname.** App views run in a
-> sandbox served from a different hostname than your Shiny app (a DNS alias of
-> the same server is fine). A different path on the same server is not enough.
+> sandbox served from a different hostname than your Shiny app. A second name
+> routed to the same server is fine (a DNS alias, or a load-balancer rule that
+> *forwards* rather than redirects). A different path on the same hostname is
+> not enough.
 > Check this first: [docs/deployment.md](docs/deployment.md).
 
 ## Use an existing MCP App
@@ -72,10 +74,10 @@ only display an outcome you already have (pass `error=str(e)` instead of a
 result to show a failed call); `call_and_render()` does both. Outside chat,
 put `mcp_widget("sales")` in your UI and use `target="sales"`.
 
-Each render returns a `RenderResult` that keeps three things apart:
-`tool_failed` (the tool's outcome), `display` / `render_error` (what Python
-showed in the widget), and nothing about the browser: whether the app actually
-started there is `host.widget_status(target) == "initialized"`.
+Each render returns a `RenderResult` that keeps the tool's outcome
+(`tool_failed`) apart from what Python showed in the widget (`display`,
+`render_error`). Whether the app then started in the browser is a separate,
+reactive question: `host.widget_status(target) == "initialized"`.
 
 ## Build your own MCP App
 
@@ -163,4 +165,6 @@ malicious app. Details: [docs/architecture.md](docs/architecture.md).
 | [Examples](examples/README.md) · [Development](docs/development.md) · [Changelog](CHANGELOG.md) | |
 
 Implements MCP Apps spec `2026-01-26` using the official
-`@modelcontextprotocol/ext-apps` bridge (2.0.3). MIT licensed.
+`@modelcontextprotocol/ext-apps` bridge (2.0.3). MIT licensed. The package
+also ships prebuilt third-party JavaScript (MIT; the MCP SDKs are moving to
+Apache-2.0), described with its licenses in [`src/shiny_mcp_host/static/`](src/shiny_mcp_host/static/README.md).

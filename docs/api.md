@@ -42,7 +42,7 @@ without either, or when it is the app's own origin, it raises
 | `model_context(target=None)` | Reactive: the latest `ModelContextEvent` of one widget (or `None`), or a dict of all |
 | `widget_status(target)` | Reactive: the widget's lifecycle status (below), or `None` |
 | `await remove_widget(target)` | Tear down a widget and forget it (below) |
-| `await close()` | Cancel pending requests and close MCP transports; runs automatically when the session ends |
+| `await close()` | Cancel pending requests, forget all widget state and close MCP transports; runs automatically when the session ends |
 
 `target` is a widget id (namespaced in modules) or a widget tag.
 `mcp_widget(id, *, host="mcp", height=360)` is the mount point for static or
@@ -92,15 +92,18 @@ Rules the host enforces:
   context (`model_context(target)` is `None`, and callbacks receive a cleared
   event), its render and in-flight requests, and tears the View down. Rendering
   to the same id later starts afresh.
-- **Session end** runs `close()`: every pending request is cancelled, Views
-  stop receiving responses, and MCP transports close.
+- **Session end** runs `close()`: every pending request is cancelled, widget
+  state is forgotten, Views stop receiving responses, and MCP transports
+  close.
 
 ## Events
 
 `ModelContextEvent(widget_id, server, tool, content, structured_content)`,
 with `cleared` when both are empty. `AppMessageEvent(widget_id, server, tool,
 role, content)`, with `text` joining its text blocks. Callbacks may be sync or
-async and run in the session's reactive context; `on_message` callbacks run
+async. Those triggered by a View run inside the session's reactive context
+(the cleared event from `remove_widget` runs wherever you called it from);
+`on_message` callbacks run
 while the View waits for the answer, so record the event and do slow work in
 a reactive effect (see `examples/sales_explorer/app.py`).
 
@@ -148,7 +151,7 @@ still HTML, CSS and JavaScript. See the README and
 
 - Browser console: `[shiny-mcp-host]` (adapter) and `[shiny-mcp sandbox]`.
 - On the `<shiny-mcp-widget>` element: `data-state` (`mounting`, `loading`,
-  `ready`, `error`, `fallback`, `disconnected`, `removed`) and, on errors,
+  `ready`, `error`, `fallback`, `unmounted`, `disconnected`, `removed`) and, on errors,
   `data-error-code`: `sandbox_config` (unsafe sandbox URL, refused before
   loading), `sandbox_unreachable` (the browser could not load or embed the
   sandbox), `view_init_timeout` (the View loaded but never initialized),
