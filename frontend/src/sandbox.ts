@@ -6,7 +6,14 @@
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/core";
 import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
 import { buildAllowAttribute, type McpUiResourcePermissions } from "@modelcontextprotocol/ext-apps/app-bridge";
-import { OUTER_SANDBOX, isExpectedProxyReady, randomToken, sandboxPageUrl } from "./validation";
+import {
+  OUTER_SANDBOX,
+  SANDBOX_METHOD_PREFIX,
+  TRUSTED_VIEW_SANDBOX,
+  isExpectedProxyReady,
+  randomToken,
+  sandboxPageUrl,
+} from "./validation";
 
 /** A failure with a machine-readable code, shown as the widget's `data-error-code`. */
 export class HostError extends Error {
@@ -18,7 +25,16 @@ export class HostError extends Error {
   }
 }
 
-/** postMessage transport bound to one sandbox window and origin. */
+/** The origin of messages from an opaque-origin (sandboxed, no allow-same-origin) frame. */
+export const OPAQUE_ORIGIN = "null";
+
+/**
+ * postMessage transport bound to one sandbox window and origin.
+ *
+ * With `OPAQUE_ORIGIN` (trusted mode: the View itself, no proxy) messages are
+ * posted with target "*", since an opaque origin cannot be named, and the
+ * View may not send `ui/notifications/sandbox-*` (the proxy's job otherwise).
+ */
 export class SandboxTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
@@ -32,6 +48,7 @@ export class SandboxTransport implements Transport {
   ) {
     this.listener = (event: MessageEvent) => {
       if (event.source !== this.target || event.origin !== this.origin) return;
+      if (this.origin === OPAQUE_ORIGIN && isSandboxMethod(event.data)) return;
       const parsed = JSONRPCMessageSchema.safeParse(event.data);
       if (parsed.success) {
         this.onmessage?.(parsed.data as JSONRPCMessage);
@@ -47,7 +64,7 @@ export class SandboxTransport implements Transport {
 
   async send(message: JSONRPCMessage): Promise<void> {
     if (this.closed) return;
-    this.target.postMessage(message, this.origin);
+    this.target.postMessage(message, this.origin === OPAQUE_ORIGIN ? "*" : this.origin);
   }
 
   async close(): Promise<void> {
@@ -56,6 +73,31 @@ export class SandboxTransport implements Transport {
     window.removeEventListener("message", this.listener);
     this.onclose?.();
   }
+}
+
+function isSandboxMethod(data: unknown): boolean {
+  const method = (data as { method?: unknown } | null)?.method;
+  return typeof method === "string" && method.startsWith(SANDBOX_METHOD_PREFIX);
+}
+
+/**
+ * Trusted mode: create the single View iframe inside `container` (opaque
+ * origin, no proxy, no sandbox server). The caller connects its transport to
+ * `iframe.contentWindow` and only then sets `srcdoc`, so the View's first
+ * message cannot be missed.
+ */
+export function createTrustedViewFrame(
+  container: HTMLElement,
+  opts: { permissions?: McpUiResourcePermissions; title: string },
+): HTMLIFrameElement {
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("sandbox", TRUSTED_VIEW_SANDBOX);
+  iframe.setAttribute("title", opts.title);
+  iframe.className = "shiny-mcp-widget-frame";
+  const allow = buildAllowAttribute(opts.permissions);
+  if (allow) iframe.setAttribute("allow", allow);
+  container.replaceChildren(iframe);
+  return iframe;
 }
 
 export interface ProxyFrame {

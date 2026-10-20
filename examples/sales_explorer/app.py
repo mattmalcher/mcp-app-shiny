@@ -18,6 +18,9 @@ Configuration (environment variables; all optional locally):
                          it stays in Python and never reaches the browser
 - SHINY_MCP_SANDBOX_URL  a deployed sandbox (.../sandbox.html) on its own hostname; when unset,
                          a development sandbox is started on http://localhost:SANDBOX_PORT (8765)
+- SHINY_MCP_DANGEROUSLY_TRUST_APPS=1
+                         experimental trusted mode: no sandbox at all (docs/architecture.md);
+                         leave SHINY_MCP_SANDBOX_URL unset
 
 docs/deployment.md deploys this file unchanged.
 """
@@ -31,14 +34,17 @@ import re
 from shiny import App, reactive, render, ui
 
 from shiny_mcp_host import MCPHost, MCPHostError
+from shiny_mcp_host.host import SANDBOX_URL_ENV, TRUST_APPS_ENV
 from shiny_mcp_host.sandbox import start_sandbox_server
 
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:3001/mcp")
 MCP_HEADERS = {"Authorization": f"Key {key}"} if (key := os.environ.get("MCP_SERVER_API_KEY")) else None
-# A deployed sandbox on its own hostname, or a local development one.
-SANDBOX_URL = (
-    os.environ.get("SHINY_MCP_SANDBOX_URL")
-    or start_sandbox_server(port=int(os.environ.get("SANDBOX_PORT", "8765"))).url
+# MCPHost reads a deployed sandbox (or trusted mode) from the environment;
+# with neither configured, run a local development sandbox.
+DEV_SANDBOX_URL = (
+    None
+    if os.environ.get(SANDBOX_URL_ENV) or os.environ.get(TRUST_APPS_ENV)
+    else start_sandbox_server(port=int(os.environ.get("SANDBOX_PORT", "8765"))).url
 )
 
 REGIONS = ["North", "South", "East", "West"]
@@ -85,7 +91,7 @@ app_ui = ui.page_sidebar(
 
 def server(input, output, session):
     chat = ui.Chat(id="chat", history=False)
-    host = MCPHost(session, sandbox_url=SANDBOX_URL)
+    host = MCPHost(session, sandbox_url=DEV_SANDBOX_URL)
     host.add_server("sales", url=MCP_SERVER_URL, headers=MCP_HEADERS)
     question = reactive.value(None)
     latest = reactive.value(None)

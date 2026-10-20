@@ -115,3 +115,19 @@ def test_inconclusive_checks_do_not_pass():
     report.add("server", "a", True, "")
     report.add("server", "b", False, "", inconclusive=True)
     assert not report.ok
+
+
+@pytest.mark.parametrize(
+    ("response", "ok", "inconclusive"),
+    [
+        ({"status": 200, "headers": {}}, True, False),
+        ({"status": 200, "headers": {"content-security-policy": ["script-src 'self'"]}}, False, True),
+        ({"status": 302, "headers": {"location": ["https://x/__login__?…"]}}, False, True),
+        ({"error": "timed out"}, False, True),
+    ],
+)
+def test_trusted_mode_reports_the_app_page_csp_views_inherit(response, ok, inconclusive):
+    report = cd.Report()
+    cd.check_app_page_csp(report, response)
+    (check,) = report.checks
+    assert (check.ok, check.inconclusive) == (ok, inconclusive)

@@ -1,7 +1,8 @@
 """Shiny app used by the browser tests, driven by the fixture MCP server.
 
 Tests send commands with ``Shiny.setInputValue("cmd", {...}, {priority: "event"})``.
-Sandbox URL comes from SHINY_MCP_SANDBOX_URL (started by the test harness).
+Sandbox URL comes from SHINY_MCP_SANDBOX_URL (started by the test harness), or
+SHINY_MCP_DANGEROUSLY_TRUST_APPS=1 runs it in trusted mode.
 """
 
 import json

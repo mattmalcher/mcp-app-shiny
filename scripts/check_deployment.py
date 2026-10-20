@@ -1,6 +1,7 @@
 """Check a deployed sales explorer (Shiny app + sandbox + MCP server) end to end.
 
     python scripts/check_deployment.py --app-url URL --sandbox-url URL [--mcp-url URL] [options]
+    python scripts/check_deployment.py --app-url URL --trusted [--mcp-url URL] [options]
 
 Runs, in order, and reports each check as PASS, FAIL or INCONCLUSIVE:
 
@@ -16,6 +17,12 @@ Runs, in order, and reports each check as PASS, FAIL or INCONCLUSIVE:
 3. isolation: the View's frames are on the sandbox origin with the expected sandbox
               attributes, cannot reach the Shiny page or its cookie, cannot fetch, and
               a tool call outside the policy is refused.
+
+With --trusted (the app runs with SHINY_MCP_DANGEROUSLY_TRUST_APPS=1, no sandbox):
+the server stage reports whether the app page sends a Content-Security-Policy, which
+the View's srcdoc iframe inherits (INCONCLUSIVE if present: the browser run decides);
+the isolation stage checks the single View iframe is opaque-origin, has no
+allow-same-origin, and is still contained, as above.
 
 Server checks passing while browser checks fail points at the browser side (frame
 headers seen only by browsers, mixed content, login redirects inside the frame).
@@ -127,13 +134,35 @@ def sanitized_headers(url: str) -> dict[str, Any]:
 
 def check_server_side(report: Report, args: argparse.Namespace, evidence: dict[str, Any]) -> None:
     app_origin = origin(args.app_url)
-    for c in check_sandbox(args.sandbox_url, app_origin):
-        report.add("server", f"sandbox {c.name}", c.ok, c.detail, inconclusive=c.inconclusive)
-    page = f"{args.sandbox_url}?{urlencode({'host': app_origin, 'nonce': 'x' * 32})}"
-    evidence["sandbox_response"] = sanitized_headers(page)
     evidence["app_response"] = sanitized_headers(args.app_url)
+    if args.trusted:
+        check_app_page_csp(report, evidence["app_response"])
+    else:
+        for c in check_sandbox(args.sandbox_url, app_origin):
+            report.add("server", f"sandbox {c.name}", c.ok, c.detail, inconclusive=c.inconclusive)
+        page = f"{args.sandbox_url}?{urlencode({'host': app_origin, 'nonce': 'x' * 32})}"
+        evidence["sandbox_response"] = sanitized_headers(page)
     if args.mcp_url:
         check_mcp(report, args.mcp_url, os.environ.get("MCP_API_KEY"))
+
+
+def check_app_page_csp(report: Report, response: dict[str, Any]) -> None:
+    """Trusted mode: Views are srcdoc iframes, which inherit the app page's CSP."""
+    if "error" in response or response.get("status") != 200:
+        detail = response.get("error") or f"HTTP {response.get('status')}"
+        report.add("server", "app page CSP", False, f"app page not fetched ({detail})", inconclusive=True)
+        return
+    policies = response["headers"].get("content-security-policy", [])
+    if not policies:
+        report.add("server", "app page CSP", True, "none sent; Views get only their own policy")
+        return
+    report.add(
+        "server",
+        "app page CSP",
+        False,
+        f"Views inherit {policies!r}; inline View scripts need 'unsafe-inline' in script-src",
+        inconclusive=True,
+    )
 
 
 def check_mcp(report: Report, url: str, key: str | None) -> None:
@@ -229,7 +258,7 @@ def check_browser(report: Report, args: argparse.Namespace, evidence: dict[str, 
     from playwright.sync_api import expect, sync_playwright
 
     app_origin = origin(args.app_url)
-    sandbox_origin = origin(args.sandbox_url)
+    sandbox_origin = None if args.trusted else origin(args.sandbox_url)
     app_key = os.environ.get("APP_API_KEY")
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -304,10 +333,13 @@ def _browser_flow(report, page, args, app_origin, sandbox_origin, expect, PWTime
 
     outer_el = w.locator("iframe.shiny-mcp-widget-frame")
     outer = outer_el.element_handle().content_frame()
-    inner = outer.locator("iframe").element_handle().content_frame()
-    check_isolation(report, page, outer_el, outer, inner, app_origin, sandbox_origin)
-
-    v = w.frame_locator("iframe.shiny-mcp-widget-frame").frame_locator("iframe")
+    if sandbox_origin is None:  # trusted mode: the widget's iframe is the View itself
+        check_trusted_isolation(report, page, outer_el, outer, app_origin)
+        v = w.frame_locator("iframe.shiny-mcp-widget-frame")
+    else:
+        inner = outer.locator("iframe").element_handle().content_frame()
+        check_isolation(report, page, outer_el, outer, inner, app_origin, sandbox_origin)
+        v = w.frame_locator("iframe.shiny-mcp-widget-frame").frame_locator("iframe")
     total = v.locator("#total").inner_text()
     v.get_by_label("Product").select_option("Gadgets")
     try:
@@ -374,14 +406,30 @@ def check_isolation(report, page, outer_el, outer, inner, app_origin, sandbox_or
         "allow-same-origin" not in inner_sandbox and "allow-scripts" in inner_sandbox,
         f"sandbox={inner_sandbox!r}",
     )
+    check_view_contained(report, page, inner, app_origin)
+
+
+def check_trusted_isolation(report, page, frame_el, view, app_origin) -> None:
+    sandbox = frame_el.get_attribute("sandbox") or ""
+    report.add(
+        "isolation",
+        "View frame",
+        sandbox.split() == ["allow-scripts", "allow-forms"] and frame_el.get_attribute("src") is None,
+        f"trusted mode: one srcdoc frame, sandbox={sandbox!r}",
+    )
+    check_view_contained(report, page, view, app_origin)
+
+
+def check_view_contained(report, page, view, app_origin) -> None:
     page.context.add_cookies([{"name": "deploy_check_secret", "value": "s3cret", "url": page.url}])
-    probes = inner.evaluate(INNER_PROBES, {"appOrigin": app_origin})
+    probes = view.evaluate(INNER_PROBES, {"appOrigin": app_origin})
     report.add(
         "isolation",
         "View cannot reach the Shiny page",
         not probes["parentDocument"]
         and not probes["topDocument"]
-        and "s3cret" not in (probes["cookie"] or ""),
+        and "s3cret" not in (probes["cookie"] or "")
+        and probes["origin"] == "null",
         f"parent.document={probes['parentDocument']}, top.document={probes['topDocument']}, "
         f"opaque origin={probes['origin']}",
     )
@@ -401,8 +449,12 @@ def main() -> None:
     parser.add_argument(
         "--app-url", required=True, help="the Shiny app, e.g. https://connect.example.com/content/<guid>/"
     )
-    parser.add_argument(
-        "--sandbox-url", required=True, help="the sandbox page on its own hostname (…/sandbox.html)"
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--sandbox-url", help="the sandbox page on its own hostname (…/sandbox.html)")
+    mode.add_argument(
+        "--trusted",
+        action="store_true",
+        help="the app runs in trusted mode (SHINY_MCP_DANGEROUSLY_TRUST_APPS=1): no sandbox",
     )
     parser.add_argument("--mcp-url", help="the MCP endpoint (…/mcp), to check it directly (optional)")
     parser.add_argument(
@@ -420,6 +472,7 @@ def main() -> None:
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "app_url": args.app_url,
         "sandbox_url": args.sandbox_url,
+        "mode": "trusted" if args.trusted else "sandboxed",
         "mcp_url": args.mcp_url,
         "checker": {
             "shiny_mcp_host": __version__,

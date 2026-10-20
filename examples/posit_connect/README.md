@@ -7,6 +7,7 @@ are the maintained [`sales_explorer`](../sales_explorer/) example, unchanged.
 ```bash
 make connect-bundles     # -> dist/connect/{mcp-server,sandbox,shiny-app}
 make rehearse-connect    # run all three locally from clean venvs and check them
+make rehearse-connect-trusted   # trusted mode: MCP server + Shiny app only, no sandbox
 ```
 
 Walkthrough: [docs/deployment.md](../../docs/deployment.md).

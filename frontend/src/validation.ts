@@ -9,6 +9,9 @@ export const INNER_SANDBOX_ALLOWED = ["allow-scripts", "allow-forms", "allow-sam
 /** Sandbox attribute of the outer proxy iframe (spec: allow-scripts + allow-same-origin). */
 export const OUTER_SANDBOX = "allow-scripts allow-same-origin allow-forms";
 
+/** Sandbox attribute of the single View iframe in trusted mode: opaque origin, no escapes. */
+export const TRUSTED_VIEW_SANDBOX = "allow-scripts allow-forms";
+
 export const SANDBOX_METHOD_PREFIX = "ui/notifications/sandbox-";
 export const PROXY_READY = "ui/notifications/sandbox-proxy-ready";
 export const RESOURCE_READY = "ui/notifications/sandbox-resource-ready";
@@ -85,6 +88,24 @@ export function checkSandboxUrl(sandboxUrl: unknown, pageOrigin: string, viewSam
     };
   }
   return { ok: true, origin: url.origin };
+}
+
+/**
+ * Prefix the View's HTML with a document start the host controls: a doctype
+ * and a `<meta>` Content-Security-Policy, which the parser places in the
+ * head before it reads a single byte of the View. Used in trusted mode,
+ * where there is no sandbox server to send the policy as a header.
+ *
+ * The View's HTML is never searched (a `<head>` inside a comment or a
+ * script, or a script before it, would defeat that). Its own doctype and
+ * `<html>`/`<head>` tags arrive after the head has started, where HTML
+ * parsing ignores them (attributes on `<html>` are merged), so the View's
+ * head content still ends up in the head. A View without a doctype renders
+ * in standards mode rather than quirks mode.
+ */
+export function withMetaCsp(html: string, policy: string): string {
+  const escaped = policy.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${escaped}">${html}`;
 }
 
 /** Build the sandbox page URL for one mount. */

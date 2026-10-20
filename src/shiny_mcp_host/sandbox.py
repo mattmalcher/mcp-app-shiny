@@ -102,8 +102,12 @@ def _sources(csp: dict[str, Any], key: str) -> list[str]:
     return [v for v in values[:64] if _is_valid_csp_source(v)]
 
 
-def build_csp_header(csp: dict[str, Any] | None, host_origin: str) -> str:
-    """Build the sandbox CSP. Defaults follow the MCP Apps spec's restrictive policy."""
+def build_csp_header(csp: dict[str, Any] | None, host_origin: str | None) -> str:
+    """Build the sandbox CSP. Defaults follow the MCP Apps spec's restrictive policy.
+
+    ``host_origin=None`` omits ``frame-ancestors``, which a ``<meta>`` CSP
+    (trusted mode) cannot carry.
+    """
     csp = csp or {}
     resource = " ".join(_sources(csp, "resourceDomains"))
     connect = " ".join(_sources(csp, "connectDomains"))
@@ -121,8 +125,9 @@ def build_csp_header(csp: dict[str, Any] | None, host_origin: str) -> str:
         "object-src 'none'",
         f"base-uri {base}" if base else "base-uri 'self'",
         "form-action 'none'",
-        f"frame-ancestors {host_origin}",
     ]
+    if host_origin is not None:
+        directives.append(f"frame-ancestors {host_origin}")
     return "; ".join(directives)
 
 

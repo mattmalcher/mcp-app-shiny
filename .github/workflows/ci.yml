@@ -56,6 +56,8 @@ jobs:
       - run: make test-compat
       - name: Posit Connect recipe, rehearsed locally (not a Connect validation)
         run: make rehearse-connect
+      - name: Posit Connect recipe in trusted mode, rehearsed locally
+        run: make rehearse-connect-trusted
 
       - name: Upload traces and logs on failure
         if: failure()
