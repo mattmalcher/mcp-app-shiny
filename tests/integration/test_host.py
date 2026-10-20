@@ -135,7 +135,7 @@ async def test_a01_official_demo_server(demo_server):
         assert tools["get-time"].ui_resource_uri == "ui://get-time/mcp-app.html"
         await mount(host, session, "w")
         result = await host.call_and_render("demo", "get-time", {}, target="w")
-        assert result.ok and "time" in result.result.structured_content
+        assert result.display == "view" and "time" in result.result.structured_content
         msg = await session.wait_for(lambda m: m["kind"] == "render")
         assert "Get Server Time" in msg["payload"]["resource"]["html"]
     finally:
@@ -150,15 +150,18 @@ async def test_a02_tool_results_and_errors(env):
     assert failed.is_error
     # A non-UI tool renders its text fallback.
     await mount(host, session, "w1")
-    await host.call_and_render("fx", "fail", {}, target="w1")
+    out = await host.call_and_render("fx", "fail", {}, target="w1")
     fb = await session.wait_for(lambda m: m["kind"] == "fallback")
     assert fb["payload"]["is_error"] is True
+    # A tool-level error (isError) is a tool failure, not a render failure.
+    assert out.display == "text" and out.tool_failed and out.tool_error is None and out.render_error is None
 
 
 async def test_a03_render_message(env):
     host, session = env
     result, msg = await render(host, session)
-    assert result.ok and result.result.structured_content == {"count": 3}
+    assert result.display == "view" and not result.tool_failed
+    assert result.result.structured_content == {"count": 3}
     p = msg["payload"]
     assert msg["mount_id"] == "m1"
     assert p["resource"]["uri"] == "ui://fixture/counter.html"
@@ -442,7 +445,7 @@ async def test_a10_parallel_widgets_same_server(env):
 async def test_a11_bad_resources_are_bounded_errors(env, tool, needle):
     host, session = env
     result, msg = await render(host, session, tool=tool, args={})
-    assert not result.ok and needle in result.error
+    assert result.display == "error" and needle in result.render_error
     assert msg["kind"] == "error" and needle in msg["payload"]["message"]
     if tool not in ("missing-ui", "nonexistent-tool"):
         assert "text fallback" in msg["payload"].get("fallback_text", "")
@@ -455,7 +458,7 @@ async def test_a11_server_unavailable():
     try:
         await mount(host, session, "w1")
         result = await host.call_and_render("down", "counter", {}, target="w1")
-        assert not result.ok and "Could not connect" in result.error
+        assert result.display == "error" and "Could not connect" in result.render_error
         err = await session.wait_for(lambda m: m["kind"] == "error")
         assert err["payload"]["code"] == "server_unavailable"
     finally:
@@ -471,7 +474,8 @@ async def test_a11_timeout_settles_pending(fixture_server):
         # The tool timed out but the View still renders, receiving a cancellation.
         assert msg["kind"] == "render" and "timed out" in msg["payload"]["tool_cancelled"]["reason"]
         assert msg["payload"]["tool_result"] is None
-        assert "timed out" in result.error
+        assert result.display == "view" and result.tool_failed and "timed out" in result.tool_error
+        assert result.render_error is None
         # The host keeps working afterwards.
         assert (await host.call_tool("fx", "plain")).content[0].text == "plain: hello"
     finally:
@@ -582,7 +586,7 @@ async def test_stdio_transport_with_official_server():
     try:
         await mount(host, session, "w")
         result = await host.call_and_render("demo", "get-time", {}, target="w")
-        assert result.ok and "time" in result.result.structured_content
+        assert result.display == "view" and "time" in result.result.structured_content
         await session.wait_for(lambda m: m["kind"] == "render")
     finally:
         await host.close()
@@ -599,7 +603,7 @@ async def test_render_result_does_not_call_the_tool_again(env):
     result = await host.call_tool("fx", "increment", {"count": 1})
     assert (await stats(host))["increment"] == 1
     out = await host.render_result("fx", "increment", {"count": 1}, result, target="w1")
-    assert out.ok
+    assert out.display == "view" and not out.tool_failed
     msg = await session.wait_for(lambda m: m["kind"] == "render")
     assert msg["payload"]["tool_result"]["structuredContent"] == {"count": 2}
     assert msg["payload"]["tool_input"] == {"arguments": {"count": 1}}
@@ -610,17 +614,17 @@ async def test_render_result_accepts_wire_json_and_errors(env):
     host, session = env
     await mount(host, session, "w1")
     wire = {"content": [{"type": "text", "text": "count=5"}], "structuredContent": {"count": 5}}
-    assert (await host.render_result("fx", "counter", {}, wire, target="w1")).ok
+    assert (await host.render_result("fx", "counter", {}, wire, target="w1")).display == "view"
     msg = await session.wait_for(lambda m: m["kind"] == "render")
     assert msg["payload"]["tool_result"]["structuredContent"] == {"count": 5}
     # A failed call still renders the View, which receives a cancellation.
     out = await host.render_result("fx", "counter", {}, None, target="w1", error="agent aborted")
-    assert out.error == "agent aborted"
+    assert out.tool_error == "agent aborted" and out.display == "view" and out.render_error is None
     msg = await session.wait_for(lambda m: m["kind"] == "render" and m["payload"]["render_id"] == 2)
     assert msg["payload"]["tool_cancelled"] == {"reason": "agent aborted"}
     # Malformed results become a readable widget error.
     bad = await host.render_result("fx", "counter", {}, {"content": "nope"}, target="w1")
-    assert "Invalid tool result" in bad.error
+    assert bad.display == "error" and "Invalid tool result" in bad.render_error
     await session.wait_for(lambda m: m["kind"] == "error")
 
 
@@ -637,7 +641,7 @@ async def test_unknown_server_is_a_widget_error(env):
     host, session = env
     await mount(host, session, "w1")
     out = await host.call_and_render("nope", "counter", {}, target="w1")
-    assert "Unknown MCP server" in out.error
+    assert "Unknown MCP server" in out.render_error
     await session.wait_for(lambda m: m["kind"] == "error")
 
 
@@ -648,8 +652,9 @@ async def test_stale_outcomes_never_overwrite_a_newer_render(env, slow_tool):
     older = asyncio.create_task(host.call_and_render("fx", slow_tool, {"seconds": 1.0}, target="w1"))
     await asyncio.sleep(0.2)
     newer = await host.call_and_render("fx", "counter", {"start": 9}, target="w1")
-    assert newer.ok
-    assert (await older).error == "superseded"
+    assert newer.display == "view"
+    stale = await older
+    assert stale.superseded and stale.display is None and stale.render_error is None
     final = [m for m in session.sent if m["kind"] in ("render", "fallback", "error")]
     assert len(final) == 1 and final[0]["payload"]["tool_result"]["structuredContent"] == {"count": 9}
     # A remount still gets the newest render.
@@ -673,11 +678,154 @@ async def test_stale_error_does_not_overwrite(env):
     conn.read_resource = gated_read
     older = asyncio.create_task(host.call_and_render("fx", "broken-mime", {}, target="w1"))
     await asyncio.sleep(0.3)
-    assert (await host.call_and_render("fx", "counter", {"start": 2}, target="w1")).ok
+    assert (await host.call_and_render("fx", "counter", {"start": 2}, target="w1")).display == "view"
     gate.set()
-    assert (await older).error == "superseded"
+    assert (await older).superseded
     assert session.of("error") == []
     assert session.of("render")[-1]["payload"]["tool_result"]["structuredContent"] == {"count": 2}
+
+
+# ----------------------------------------------- rendering never executes
+
+
+class FakeChat:
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
+
+    async def append_message(self, message: Any) -> None:
+        self.messages.append(message)
+
+
+def chat_widget_id(chat: FakeChat) -> str:
+    """The widget id inside the last assistant message appended by render_in_chat."""
+    return str(chat.messages[-1]["content"][-1].attrs["data-widget-id"])
+
+
+async def test_render_in_chat_never_calls_the_tool(env):
+    host, session = env
+    chat = FakeChat()
+    result = await host.call_tool("fx", "increment", {"count": 4})
+    out = await host.render_in_chat(chat, "fx", "increment", {"count": 4}, result, text="Here:")
+    assert out.display == "view" and out.widget_id == chat_widget_id(chat)
+    await mount(host, session, out.widget_id)
+    msg = await session.wait_for(lambda m: m["kind"] == "render")
+    assert msg["payload"]["tool_result"]["structuredContent"] == {"count": 5}
+    assert (await stats(host))["increment"] == 1  # only the caller's own call
+
+
+async def test_render_methods_require_an_outcome(env):
+    host, _ = env
+    chat = FakeChat()
+    # Omitting the outcome used to execute the tool; now it is a programming error.
+    with pytest.raises(ValueError, match="never call the tool"):
+        await host.render_in_chat(chat, "fx", "increment", {"count": 1})
+    with pytest.raises(ValueError, match="exactly one"):
+        await host.render_result("fx", "increment", {"count": 1}, target="w1")
+    with pytest.raises(ValueError, match="exactly one"):
+        result = await host.call_tool("fx", "plain")
+        await host.render_result("fx", "plain", {}, result, target="w1", error="both")
+    assert chat.messages == []  # nothing appended for a rejected call
+    assert (await stats(host))["increment"] == 0
+
+
+async def test_render_in_chat_shows_a_failed_call_without_retrying(env):
+    host, session = env
+    chat = FakeChat()
+    # A View tool whose call failed: the View is shown and told the call was cancelled.
+    out = await host.render_in_chat(chat, "fx", "increment", {"count": 1}, error="agent aborted")
+    assert out.display == "view" and out.tool_failed and out.result is None
+    await mount(host, session, out.widget_id)
+    msg = await session.wait_for(lambda m: m["kind"] == "render")
+    assert msg["payload"]["tool_cancelled"] == {"reason": "agent aborted"}
+    # A tool without a UI: the failure is shown as an error in the widget.
+    out = await host.render_in_chat(chat, "fx", "plain", {}, error="server said no")
+    assert out.display == "error" and out.tool_error == "server said no" and out.render_error is None
+    await mount(host, session, out.widget_id, "m2")
+    err = await session.wait_for(lambda m: m["kind"] == "error" and m["widget_id"] == out.widget_id)
+    assert err["payload"] == {"code": "tool_failed", "message": "server said no"}
+    assert (await stats(host))["increment"] == 0
+
+
+async def test_call_and_render_reports_a_failed_call_as_tool_error(fixture_server):
+    session = FakeSession()
+    host = MCPHost(session, sandbox_url=SANDBOX, policy=HostPolicy(request_timeout=1.0))  # type: ignore[arg-type]
+    host.add_server("fx", url=f"{fixture_server.url}/mcp")
+    try:
+        out = await host.call_and_render("fx", "slow", {"seconds": 5}, target="w1")
+        assert out.display == "error" and out.tool_failed and "timed out" in out.tool_error
+        assert out.render_error is None
+    finally:
+        await host.close()
+
+
+# ------------------------------------------------------------ remove_widget
+
+
+async def test_remove_widget_clears_status_context_and_requests(env):
+    from shiny import reactive
+
+    host, session = env
+    host.policy = HostPolicy(app_tools={"fx": ["slow"]})
+    events = []
+    host.on_model_context(events.append)
+    _, msg = await render(host, session)
+    await session.request(host, kind="initialized", widget_id="w1", mount_id="m1", render_id=1)
+    await view_request(host, session, msg, "model-context", {"structuredContent": {"pick": 1}}, "m1.1")
+    with reactive.isolate():
+        assert host.widget_status("w1") == "initialized"
+        assert host.model_context("w1").structured_content == {"pick": 1}
+
+    # An in-flight View request is cancelled and settled.
+    slow = await session.request(
+        host,
+        kind="tools/call",
+        widget_id="w1",
+        mount_id="m1",
+        request_id="m1.2",
+        render_id=1,
+        payload={"params": {"name": "slow", "arguments": {"seconds": 30}}},
+    )
+    assert slow == {"status": "pending"}
+    await host.remove_widget("w1")
+
+    with reactive.isolate():
+        assert host.widget_status("w1") is None
+        assert host.model_context("w1") is None
+        assert host.model_context() == {}
+    assert events[-1].widget_id == "w1" and events[-1].cleared
+    assert session.of("teardown", "w1")
+    resp = await session.wait_for(lambda m: m["kind"] == "response" and m.get("request_id") == "m1.2")
+    assert resp["payload"]["error"]["code"] == "cancelled"
+    # Later requests from the removed View are rejected as stale.
+    stale = await session.request(
+        host,
+        kind="model-context",
+        widget_id="w1",
+        mount_id="m1",
+        request_id="m1.3",
+        render_id=1,
+        payload={"params": {"structuredContent": {"pick": 2}}},
+    )
+    assert stale["ok"] is False
+    with reactive.isolate():
+        assert host.model_context("w1") is None
+    # Removing again, or an unknown widget, is a no-op.
+    await host.remove_widget("w1")
+    await host.remove_widget("never-existed")
+
+
+async def test_remove_widget_drops_a_render_in_progress(env):
+    host, session = env
+    await mount(host, session, "w1")
+    pending = asyncio.create_task(host.call_and_render("fx", "slow-ui", {"seconds": 0.5}, target="w1"))
+    await asyncio.sleep(0.1)
+    await host.remove_widget("w1")
+    assert (await pending).superseded
+    assert session.of("render", "w1") == []
+    from shiny import reactive
+
+    with reactive.isolate():
+        assert host.widget_status("w1") is None
 
 
 async def test_packaged_demo_server_runs_without_the_repo(tmp_path):
@@ -705,7 +853,7 @@ async def test_packaged_demo_server_runs_without_the_repo(tmp_path):
     try:
         await mount(host, session, "w")
         out = await host.call_and_render("sales", "explore_sales", {"quarter": "Q3"}, target="w")
-        assert out.ok and out.result.structured_content["filters"]["quarter"] == "Q3"
+        assert out.display == "view" and out.result.structured_content["filters"]["quarter"] == "Q3"
         msg = await session.wait_for(lambda m: m["kind"] == "render")
         assert "query_sales" in msg["payload"]["resource"]["html"]  # bundle inlined
         # DNS-rebinding protection rejects an unexpected Host header.

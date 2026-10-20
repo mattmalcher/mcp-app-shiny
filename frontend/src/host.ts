@@ -14,7 +14,7 @@ import {
   type McpUiResourcePermissions,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { CallToolResult } from "@modelcontextprotocol/client";
-import { SandboxTransport, loadSandboxProxy } from "./sandbox";
+import { HostError, SandboxTransport, loadSandboxProxy } from "./sandbox";
 import { CUSTOM_MESSAGE_TYPE, RpcRequestError, ShinyRpc, type ServerMessage, shiny, shinyConnected } from "./shiny-transport";
 import { checkSandboxUrl, clampHeight, innerSandbox, randomToken, safeLinkUrl } from "./validation";
 
@@ -48,9 +48,9 @@ const log = {
   error: (...a: unknown[]) => console.error("[shiny-mcp-host]", ...a),
 };
 
-function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number, error: Error): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(message)), ms);
+    const t = setTimeout(() => reject(error), ms);
     p.then(
       (v) => {
         clearTimeout(t);
@@ -89,7 +89,7 @@ class ViewSession {
   async start(): Promise<void> {
     const { msg } = this;
     const check = checkSandboxUrl(msg.sandbox.url, window.location.origin, msg.sandbox.view_same_origin);
-    if (!check.ok) throw new Error(`Unsafe sandbox configuration: ${check.reason}`);
+    if (!check.ok) throw new HostError("sandbox_config", `Unsafe sandbox configuration: ${check.reason}`);
     if (check.warning) log.warn(check.warning);
 
     const { iframe, origin } = await loadSandboxProxy(this.el.frameHost, {
@@ -115,7 +115,11 @@ class ViewSession {
       permissions: msg.resource.permissions,
       sandbox: innerSandbox(msg.sandbox.view_same_origin),
     });
-    await withTimeout(initialized, INIT_TIMEOUT_MS, "The MCP App did not complete initialization");
+    await withTimeout(
+      initialized,
+      INIT_TIMEOUT_MS,
+      new HostError("view_init_timeout", "The MCP App loaded in the sandbox but did not complete initialization"),
+    );
     if (this.closed) return;
     this.initialized = true;
     // Per spec the host sends nothing to the View before `initialized`; then
@@ -343,8 +347,9 @@ export class McpWidgetElement extends HTMLElement {
         log.error("Failed to start View:", e);
         await view.close();
         this.view = undefined;
-        this.showError("view_failed", errorMessage(e));
-        rpc.request("view-error", { message: errorMessage(e) }).catch(() => {});
+        const code = e instanceof HostError ? e.code : "view_failed";
+        this.showError(code, errorMessage(e));
+        rpc.request("view-error", { code, message: errorMessage(e) }).catch(() => {});
       }
     });
   }

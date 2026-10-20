@@ -13,11 +13,12 @@ pieces talk to each other.
 | Official demo server `@modelcontextprotocol/server-basic-vanillajs` | `2.0.3` (npm, unmodified) |
 | Python MCP SDK `mcp` | `2.3.0` |
 | `shiny` / `shinychat` | `1.8.0` / `0.7.2` |
-| Node / Python | Node 22.22; Python 3.12 (tests), 3.11 (clean wheel install) |
+| Node / Python | Node 22.22; Python 3.12 (CI tests), 3.13 (also tested), 3.11 (clean wheel install and Connect bundle rehearsal) |
 | Playwright (Python) / Chromium | `1.56.0` / 141 |
 
 Exact Python versions are pinned in `uv.lock`, JavaScript versions in
-`frontend/package-lock.json`.
+`frontend/package-lock.json`. Where the browser files in the package come from
+is described in `src/shiny_mcp_host/static/README.md`.
 
 ## Upstream SDK symbols used
 
@@ -85,8 +86,9 @@ notifications (theme switching after mount), bookmark/history restoration.
 
 ### Initial data lifecycle
 
-`render_result` renders a tool result obtained elsewhere (no second
-`tools/call`); `call_and_render` calls the tool while it fetches the resource.
+`render_result` and `render_in_chat` render an outcome obtained elsewhere (a
+result, or the error of a failed call) and never send `tools/call`;
+`call_and_render` calls the tool while it fetches the resource.
 Either way Python validates the resource, then sends a single `render`
 message. Each widget's renders are numbered, and every outcome (View, text
 fallback, error) is published through one check, so an older call that
@@ -117,7 +119,9 @@ Browser → Python, via
 ```
 
 Kinds: `mount`, `unmount`, `initialized`, `tools/call`, `resources/read`,
-`model-context`, `message`, `open-link`, `log`, `view-error`. Every envelope is
+`model-context`, `message`, `open-link`, `log`, `view-error` (payload
+`{code, message}`; codes `sandbox_config`, `sandbox_unreachable`,
+`view_init_timeout`, `view_failed`). Every envelope is
 validated (`protocol.parse_envelope`): version, kind, id formats, object
 payload. `mount_id` must be the widget's current mount and `render_id` its
 current render, otherwise the request is rejected as stale.
@@ -192,7 +196,7 @@ Development: Shiny on `http://127.0.0.1:8000`, sandbox on
 `sandbox_app()` from a dedicated domain (e.g.
 `https://mcp-sandbox.example-usercontent.com`) over HTTPS, pass that
 `sandbox_url`, and set `allowed_host_origins` to your app's exact origin(s).
-An HTTPS app requires an HTTPS sandbox.
+An HTTPS app requires an HTTPS sandbox. See [deployment.md](deployment.md).
 
 ### Without a second hostname
 

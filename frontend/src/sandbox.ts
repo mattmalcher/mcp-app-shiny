@@ -8,6 +8,16 @@ import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
 import { buildAllowAttribute, type McpUiResourcePermissions } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { OUTER_SANDBOX, isExpectedProxyReady, randomToken, sandboxPageUrl } from "./validation";
 
+/** A failure with a machine-readable code, shown as the widget's `data-error-code`. */
+export class HostError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** postMessage transport bound to one sandbox window and origin. */
 export class SandboxTransport implements Transport {
   onclose?: () => void;
@@ -95,7 +105,15 @@ export function loadSandboxProxy(
     };
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(`Sandbox proxy at ${opts.sandboxOrigin} did not respond (is the sandbox server running?)`));
+      reject(
+        new HostError(
+          "sandbox_unreachable",
+          `Sandbox proxy at ${opts.sandboxOrigin} did not respond: the browser could not load or embed it. ` +
+            "Check that it is reachable from this browser without a redirect or login page, and look in the " +
+            "browser console for a blocked frame (X-Frame-Options / frame-ancestors) or TLS error. " +
+            "Server-side check: shiny-mcp-sandbox --check <sandbox URL> --host-origin <app origin>.",
+        ),
+      );
     }, opts.timeoutMs);
     window.addEventListener("message", onMessage);
     opts.signal.addEventListener("abort", onAbort);

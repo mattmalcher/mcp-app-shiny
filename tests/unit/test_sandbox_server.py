@@ -160,3 +160,160 @@ def test_works_under_a_path_prefix(mode):
     assert '<script src="sandbox.js">' in r.text
     assert c.get("/content/abc/sandbox.js").status_code == 200
     assert "frame-ancestors https://connect.example.com" in r.headers["content-security-policy"]
+
+
+# ------------------------------------------------------- check_sandbox (CLI)
+
+
+def _wrap(inner, *, extra_headers=(), redirect_to=None):
+    async def app(scope, receive, send):
+        if redirect_to and scope["type"] == "http":
+            await send(
+                {"type": "http.response.start", "status": 302, "headers": [(b"location", redirect_to)]}
+            )
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def patched(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message["headers"], *extra_headers]}
+            await send(message)
+
+        await inner(scope, receive, patched)
+
+    return app
+
+
+def _failed(checks) -> dict[str, str]:
+    return {c.name: c.detail for c in checks if not c.ok}
+
+
+APP = "http://127.0.0.1:8000"
+
+
+def test_check_sandbox_passes_for_a_correct_deployment(serve):
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    base = serve(sandbox_app([APP]))
+    checks = check_sandbox(f"{base}/sandbox.html", APP)
+    assert _failed(checks) == {}
+    assert {c.name for c in checks} >= {"reachable", "frame-ancestors", "no X-Frame-Options", "version"}
+
+
+@pytest.mark.parametrize(
+    ("wrap", "origin", "name", "needle"),
+    [
+        ({"extra_headers": [(b"x-frame-options", b"SAMEORIGIN")]}, APP, "no X-Frame-Options", "SAMEORIGIN"),
+        (
+            {"extra_headers": [(b"content-security-policy", b"frame-ancestors 'self'")]},
+            APP,
+            "frame-ancestors",
+            "extra policy",
+        ),
+        ({"redirect_to": b"https://connect.example.com/content/x/"}, APP, "reachable", "redirect"),
+        ({}, "http://127.0.0.1:9999", "reachable", "not in its allowed_host_origins"),
+    ],
+)
+def test_check_sandbox_names_each_server_side_failure(serve, wrap, origin, name, needle):
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    base = serve(_wrap(sandbox_app([APP]), **wrap))
+    failed = _failed(check_sandbox(f"{base}/sandbox.html", origin))
+    assert name in failed and needle in failed[name], failed
+
+
+def test_check_sandbox_refuses_same_origin_and_unreachable():
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    assert "distinct origin" in _failed(check_sandbox(f"{APP}/sandbox.html", APP))
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    failed = _failed(check_sandbox(f"http://localhost:{port}/sandbox.html", APP, timeout=2))
+    assert "could not connect" in failed["reachable"]
+
+
+def test_check_cli_exit_codes(serve, capsys):
+    from shiny_mcp_host.sandbox import main
+
+    base = serve(sandbox_app([APP]))
+    with pytest.raises(SystemExit) as ok:
+        main(["--check", f"{base}/sandbox.html", "--host-origin", APP])
+    assert ok.value.code == 0 and "does not prove browser embedding" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as bad:
+        main(["--check", f"{base}/sandbox.html", "--host-origin", "http://127.0.0.1:1"])
+    assert bad.value.code == 1 and "FAIL  reachable" in capsys.readouterr().out
+
+
+SBX = "https://connect-sandbox.example.com"
+
+
+@pytest.mark.parametrize(
+    ("policies", "origin", "verdict"),
+    [
+        (["frame-ancestors https://connect.example.com"], "https://connect.example.com", "allows"),
+        # An unrelated wildcard policy must not count as allowing the app.
+        (
+            ["frame-ancestors https://connect.example.com", "frame-ancestors https://*.other.example"],
+            "https://connect.example.com",
+            "blocks",
+        ),
+        (["frame-ancestors https://*.other.example"], "https://other.example", "blocks"),  # not the apex
+        (["frame-ancestors https://*.example.com"], "https://connect.example.com", "allows"),
+        (["frame-ancestors 'self'"], "https://connect.example.com", "blocks"),
+        (["frame-ancestors 'none'"], "https://connect.example.com", "blocks"),
+        (["frame-ancestors"], "https://connect.example.com", "blocks"),
+        (["frame-ancestors *"], "https://connect.example.com", "allows"),
+        (["frame-ancestors https:"], "https://connect.example.com", "allows"),
+        (["frame-ancestors http:"], "https://connect.example.com", "allows"),  # upgrade
+        (["frame-ancestors https:"], "http://127.0.0.1:8000", "blocks"),
+        (["frame-ancestors connect.example.com"], "https://connect.example.com", "allows"),  # scheme of self
+        (["frame-ancestors https://connect.example.com:8443"], "https://connect.example.com", "blocks"),
+        (["frame-ancestors https://connect.example.com:*"], "https://connect.example.com:8443", "allows"),
+        (["frame-ancestors http://127.0.0.1:8000"], "http://127.0.0.1:8001", "blocks"),
+        # Comma-joined policies (as some proxies merge headers) are separate policies.
+        (
+            ["frame-ancestors https://connect.example.com, frame-ancestors 'self'"],
+            "https://connect.example.com",
+            "blocks",
+        ),
+        # Only the first frame-ancestors directive of a policy counts.
+        (
+            ["frame-ancestors https://connect.example.com; frame-ancestors 'none'"],
+            "https://connect.example.com",
+            "allows",
+        ),
+        # Paths are not modelled: say so instead of guessing.
+        (["frame-ancestors https://connect.example.com/app/"], "https://connect.example.com", "inconclusive"),
+        (
+            ["frame-ancestors https://*.other.example", "frame-ancestors https://x/a"],
+            "https://connect.example.com",
+            "blocks",
+        ),
+        (["default-src 'none'"], "https://connect.example.com", "absent"),
+    ],
+)
+def test_frame_ancestors_verdict(policies, origin, verdict):
+    from shiny_mcp_host.sandbox import frame_ancestors_verdict
+
+    assert frame_ancestors_verdict(policies, origin, SBX)[0] == verdict
+
+
+def test_check_sandbox_reports_unmodelled_frame_ancestors_as_inconclusive(serve):
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    extra = [(b"content-security-policy", f"frame-ancestors {APP}/path/".encode())]
+    base = serve(_wrap(sandbox_app([APP]), extra_headers=extra))
+    (fa,) = [c for c in check_sandbox(f"{base}/sandbox.html", APP) if c.name == "frame-ancestors"]
+    assert not fa.ok and fa.inconclusive and fa.label == "INCONCLUSIVE"
+
+
+def test_check_sandbox_flags_an_unrelated_wildcard_policy(serve):
+    from shiny_mcp_host.sandbox import check_sandbox
+
+    extra = [(b"content-security-policy", b"frame-ancestors https://*.other.example")]
+    base = serve(_wrap(sandbox_app([APP]), extra_headers=extra))
+    (fa,) = [c for c in check_sandbox(f"{base}/sandbox.html", APP) if c.name == "frame-ancestors"]
+    assert not fa.ok and not fa.inconclusive and "does not allow" in fa.detail

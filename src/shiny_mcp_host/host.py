@@ -26,6 +26,7 @@ from shiny import reactive
 from shiny.reactive._core import get_current_context
 from shiny.session import Session, require_active_session
 
+from ._widgets import Render, Widget, WidgetStatus, WidgetStore
 from .client import ServerConfig, ServerConnection, Transport
 from .components import DEFAULT_HOST_ID, widget_tag
 from .errors import (
@@ -59,8 +60,6 @@ SANDBOX_URL_ENV = "SHINY_MCP_SANDBOX_URL"
 #: Custom message type used for every Python -> browser message.
 CUSTOM_MESSAGE_TYPE = "shiny-mcp-host"
 
-WidgetStatus = Literal["waiting", "loading", "rendered", "initialized", "error"]
-
 
 @dataclass(frozen=True)
 class ToolInfo:
@@ -81,18 +80,47 @@ class ToolInfo:
 
 @dataclass(frozen=True)
 class RenderResult:
-    """Outcome of :meth:`MCPHost.call_and_render`."""
+    """What a render call (:meth:`MCPHost.render_result`, :meth:`~MCPHost.render_in_chat`,
+    :meth:`~MCPHost.call_and_render`) sent to a widget.
+
+    Three separate questions, answered separately:
+
+    - **Did the tool succeed?** :attr:`tool_failed` (the call raised, the caller
+      passed ``error=``, or the result has ``isError``).
+    - **What did Python send to the widget?** :attr:`display`: the MCP App View,
+      a text fallback, an error message, or nothing (:attr:`superseded`).
+    - **Did the View start in the browser?** Not known when this is returned;
+      read :meth:`MCPHost.widget_status` (``"initialized"`` once the View has
+      completed the MCP Apps handshake, ``"error"`` if the browser failed).
+    """
 
     widget_id: str
     server: str
     tool: str
+    #: The tool result that was rendered (supplied by the caller, or obtained by
+    #: :meth:`MCPHost.call_and_render`); ``None`` when the call failed.
     result: CallToolResult | None
     resource_uri: str | None
-    error: str | None = None
+    #: ``"view"``: the MCP App was sent to the browser. ``"text"``: the tool has
+    #: no UI, so its text was shown. ``"error"``: an error message was shown.
+    #: ``None``: a newer render to the same widget replaced this one.
+    display: Literal["view", "text", "error"] | None
+    #: Why the tool call failed (no result). The View, if any, received
+    #: ``ui/notifications/tool-cancelled`` with this reason.
+    tool_error: str | None = None
+    #: Why the host could not present the outcome (unknown server or tool,
+    #: invalid UI resource, malformed result). Shown in the widget.
+    render_error: str | None = None
 
     @property
-    def ok(self) -> bool:
-        return self.error is None
+    def superseded(self) -> bool:
+        """A newer render to the same widget started before this one finished."""
+        return self.display is None
+
+    @property
+    def tool_failed(self) -> bool:
+        """The call failed or returned a tool-level error (``isError``)."""
+        return self.tool_error is not None or bool(self.result is not None and self.result.is_error)
 
 
 @dataclass(frozen=True)
@@ -125,25 +153,6 @@ class AppMessageEvent:
         return "\n".join(
             str(c.get("text", "")) for c in self.content if isinstance(c, Mapping) and c.get("type") == "text"
         )
-
-
-@dataclass
-class _Render:
-    render_id: int
-    server: str
-    tool: str
-    message: dict[str, Any]
-
-
-@dataclass
-class _Widget:
-    id: str
-    mount_id: str | None = None
-    render: _Render | None = None
-    status: WidgetStatus = "waiting"
-    status_message: dict[str, Any] | None = None
-    tasks: dict[asyncio.Task[Any], tuple[str, str]] = field(default_factory=dict)
-    render_seq: int = 0
 
 
 Callback = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
@@ -179,6 +188,15 @@ def _origin(url: str) -> str:
 class MCPHost:
     """Hosts MCP Apps for one Shiny session.
 
+    The public coordinator: it registers MCP servers, renders tool outcomes
+    into widgets, relays and authorises requests from Views, and runs your
+    callbacks. Per-widget state lives in a ``WidgetStore``.
+
+    Executing and rendering are separate. :meth:`call_tool` executes a tool;
+    :meth:`render_result` and :meth:`render_in_chat` only display an outcome
+    you already have (a result, or the error from a failed call);
+    :meth:`call_and_render` does both.
+
     Parameters
     ----------
     session
@@ -213,11 +231,9 @@ class MCPHost:
         self.theme = theme
         self.sandbox_url = self._validate_sandbox_url(sandbox_url or os.environ.get(SANDBOX_URL_ENV))
         self._servers: dict[str, ServerConnection] = {}
-        self._widgets: dict[str, _Widget] = {}
+        self._widgets = WidgetStore()
         self._model_context_callbacks: list[Callback] = []
         self._message_callbacks: list[Callback] = []
-        self._model_context: reactive.Value[dict[str, ModelContextEvent]] = reactive.Value({})
-        self._statuses: reactive.Value[dict[str, WidgetStatus]] = reactive.Value({})
         self._auto_ids = itertools.count(1)
         self._closed = False
         self._handler_name = f"shiny-mcp-host:{self.id}"
@@ -356,24 +372,47 @@ class MCPHost:
     ) -> RenderResult:
         """Render the MCP App View for a tool call that has **already happened**.
 
-        Use this when your own code (e.g. an LLM agent loop calling
-        :meth:`call_tool`) made the call: the tool is not called again, so side
-        effects are never duplicated. ``result`` may be a ``CallToolResult`` or
-        its JSON form; pass ``error`` instead when the call failed, and the View
-        receives a cancellation. The View's later tool calls still go through
-        Python and :class:`HostPolicy`.
+        Never calls the tool, so side effects are never repeated: use it when
+        your own code (e.g. an LLM agent loop calling :meth:`call_tool`) made
+        the call. Pass exactly one of ``result`` (a ``CallToolResult`` or its
+        JSON form) or ``error`` (why the call failed; the View receives a
+        cancellation with that reason). The View's later tool calls still go
+        through Python and :class:`HostPolicy`.
+
+        Raises ``ValueError`` if both or neither of ``result`` and ``error``
+        are given. Every other problem is shown in the widget and reported in
+        the returned :class:`RenderResult`.
         """
-        w, token = await self._begin_render(target, f"Rendering {tool}…")
-        if result is not None and not isinstance(result, CallToolResult):
-            try:
-                result = CallToolResult.model_validate(dict(result))
-            except Exception as e:  # noqa: BLE001 - reported in the widget
-                return await self._fail(
-                    w, token, server, tool, None, None, MCPHostError(f"Invalid tool result: {e}")
-                )
-        if result is None and error is None:
-            error = "No tool result was provided"
-        return await self._present(w, token, server, tool, arguments, result, error, prefetch=None)
+        _require_outcome(result, error)
+        return await self._render_outcome(
+            self._resolve_target(target), server, tool, arguments, result, error
+        )
+
+    async def render_in_chat(
+        self,
+        chat: Any,
+        server: str,
+        tool: str,
+        arguments: Mapping[str, Any] | None = None,
+        result: CallToolResult | Mapping[str, Any] | None = None,
+        *,
+        error: str | None = None,
+        text: str | None = None,
+        height: int | str = 360,
+    ) -> RenderResult:
+        """Append an assistant message with a new widget to a ``ui.Chat`` and render an outcome into it.
+
+        Like :meth:`render_result`, this **never calls the tool**: pass the
+        ``result`` your code already has, or ``error`` for a call that failed.
+        To call the tool and render in one step, use :meth:`call_and_render`
+        with ``target=`` a :meth:`widget` you appended yourself. ``text`` is an
+        optional paragraph shown above the widget.
+        """
+        _require_outcome(result, error)
+        tag = self.widget(height=height)
+        content = TagList(tag) if text is None else TagList(tags.p(text), tag)
+        await chat.append_message({"role": "assistant", "content": content})
+        return await self._render_outcome(self._resolve_target(tag), server, tool, arguments, result, error)
 
     async def call_and_render(
         self,
@@ -385,18 +424,19 @@ class MCPHost:
     ) -> RenderResult:
         """Call ``tool`` on ``server`` and render its MCP App View in ``target``.
 
-        Equivalent to :meth:`call_tool` followed by :meth:`render_result`, except
-        that the UI resource is fetched while the tool runs. The widget may be
-        mounted before or after this call. Errors are shown in the widget and
-        returned in :attr:`RenderResult.error`.
+        The only render method that executes the tool. Equivalent to
+        :meth:`call_tool` followed by :meth:`render_result`, except that the UI
+        resource is fetched while the tool runs. The widget may be mounted
+        before or after this call. A failed call is not raised: it is shown in
+        the widget and reported in :attr:`RenderResult.tool_error`.
         """
-        w, token = await self._begin_render(target, f"Running {tool}…")
+        w, token = await self._begin_render(self._resolve_target(target), f"Running {tool}…")
         try:
             conn = self._server(server)
             tool_def = await self._tool_def(server, tool)
             uri = get_tool_ui_resource_uri(tool_def)
         except MCPHostError as e:
-            return await self._fail(w, token, server, tool, None, None, e)
+            return await self._fail(w, token, server, tool, None, None, None, e)
         prefetch = asyncio.ensure_future(self._load_ui(server, uri)) if uri else None
         result: CallToolResult | None = None
         error: str | None = None
@@ -408,25 +448,42 @@ class MCPHost:
 
     # Render lifecycle. A widget's renders are ordered by ``token``; every
     # outcome (View, text fallback, error) is published only through
-    # ``_publish``, which drops it if a newer render has started meanwhile.
+    # ``_publish``, which drops it if a newer render has started meanwhile or
+    # the widget was removed.
 
-    async def _begin_render(self, target: str | Tag, label: str) -> tuple[_Widget, int]:
-        w = self._widget(self._resolve_target(target))
-        w.render_seq += 1
-        token = w.render_seq
+    async def _render_outcome(
+        self,
+        widget_id: str,
+        server: str,
+        tool: str,
+        arguments: Mapping[str, Any] | None,
+        result: CallToolResult | Mapping[str, Any] | None,
+        error: str | None,
+    ) -> RenderResult:
+        w, token = await self._begin_render(widget_id, f"Rendering {tool}…")
+        if result is not None and not isinstance(result, CallToolResult):
+            try:
+                result = CallToolResult.model_validate(dict(result))
+            except Exception as e:  # noqa: BLE001 - reported in the widget
+                exc = MCPHostError(f"Invalid tool result: {e}")
+                return await self._fail(w, token, server, tool, None, None, None, exc)
+        return await self._present(w, token, server, tool, arguments, result, error, prefetch=None)
+
+    async def _begin_render(self, widget_id: str, label: str) -> tuple[Widget, int]:
+        w, token = self._widgets.begin_render(widget_id)
         await self._publish(w, token, "loading", {"kind": "loading", "payload": {"label": label}})
         return w, token
 
-    def _is_current(self, w: _Widget, token: int) -> bool:
-        return self._widgets.get(w.id) is w and w.render_seq == token and not self._closed
+    def _is_current(self, w: Widget, token: int) -> bool:
+        return self._widgets.is_current(w, token) and not self._closed
 
     async def _publish(
         self,
-        w: _Widget,
+        w: Widget,
         token: int,
         status: WidgetStatus,
         message: dict[str, Any] | None,
-        render: _Render | None = None,
+        render: Render | None = None,
     ) -> bool:
         """Make ``token``'s outcome the widget's state, unless it is stale."""
         if not self._is_current(w, token):
@@ -434,13 +491,12 @@ class MCPHost:
         if status != "loading":
             w.render = render
             await self._cancel_widget_tasks(w)
-        w.status = status
         w.status_message = message
         if message is not None:
             await self._send(w.id, message["kind"], message["payload"])
         if render is not None:
             await self._push_render(w)
-        await _set_reactive(lambda: self._update_status_value(w.id, status))
+        await _set_reactive(lambda: self._widgets.set_status(w, status))
         return True
 
     async def _tool_def(self, server: str, tool: str) -> Tool:
@@ -455,7 +511,7 @@ class MCPHost:
 
     async def _present(
         self,
-        w: _Widget,
+        w: Widget,
         token: int,
         server: str,
         tool: str,
@@ -465,25 +521,16 @@ class MCPHost:
         *,
         prefetch: asyncio.Future[tuple[str, Mapping[str, Any]]] | None,
     ) -> RenderResult:
-        """Publish the outcome of a finished (or failed) tool call."""
+        """Publish the outcome of a finished (or failed) tool call: exactly one of ``result``/``error``."""
         uri: str | None = None
         try:
             tool_def = await self._tool_def(server, tool)
             uri = get_tool_ui_resource_uri(tool_def)
             if uri is None:
-                if result is None:
-                    raise MCPHostError(error or "Tool call failed")
-                payload = {
-                    "server": server,
-                    "tool": tool,
-                    "text": _result_text(result),
-                    "is_error": bool(result.is_error),
-                }
-                ok = await self._publish(w, token, "rendered", {"kind": "fallback", "payload": payload})
-                return RenderResult(w.id, server, tool, result, None, error=None if ok else "superseded")
+                return await self._present_text(w, token, server, tool, result, error)
             html, ui_meta = await (prefetch if prefetch is not None else self._load_ui(server, uri))
         except MCPHostError as e:
-            return await self._fail(w, token, server, tool, uri, result, e)
+            return await self._fail(w, token, server, tool, uri, result, error, e)
         finally:
             if prefetch is not None and not prefetch.done():
                 prefetch.cancel()
@@ -491,49 +538,52 @@ class MCPHost:
         message = self._render_message(
             token, server, tool_def, uri, html, ui_meta, dict(arguments or {}), result, cancelled
         )
-        ok = await self._publish(w, token, "rendered", None, _Render(token, server, tool, message))
-        if not ok:
-            return RenderResult(w.id, server, tool, result, uri, error="superseded")
-        return RenderResult(w.id, server, tool, result, uri, error=error)
+        shown = await self._publish(w, token, "rendered", None, Render(token, server, tool, message))
+        return RenderResult(w.id, server, tool, result, uri, "view" if shown else None, tool_error=error)
+
+    async def _present_text(
+        self, w: Widget, token: int, server: str, tool: str, result: CallToolResult | None, error: str | None
+    ) -> RenderResult:
+        """Outcome of a tool without a UI: its text, or the reason it failed."""
+        if result is None:
+            payload = {"code": "tool_failed", "message": error or "Tool call failed"}
+            shown = await self._publish(w, token, "error", {"kind": "error", "payload": payload})
+            return RenderResult(w.id, server, tool, None, None, "error" if shown else None, tool_error=error)
+        payload = {
+            "server": server,
+            "tool": tool,
+            "text": _result_text(result),
+            "is_error": bool(result.is_error),
+        }
+        shown = await self._publish(w, token, "rendered", {"kind": "fallback", "payload": payload})
+        return RenderResult(w.id, server, tool, result, None, "text" if shown else None)
 
     async def _fail(
         self,
-        w: _Widget,
+        w: Widget,
         token: int,
         server: str,
         tool: str,
         uri: str | None,
         result: CallToolResult | None,
+        tool_error: str | None,
         exc: MCPHostError,
     ) -> RenderResult:
+        """The host could not present the outcome; show why (and the result's text, if any)."""
         payload: dict[str, Any] = {"code": exc.code, "message": str(exc)}
         if result is not None:
             payload["fallback_text"] = _result_text(result)
-        ok = await self._publish(w, token, "error", {"kind": "error", "payload": payload})
-        return RenderResult(w.id, server, tool, result, uri, error=str(exc) if ok else "superseded")
-
-    async def render_in_chat(
-        self,
-        chat: Any,
-        server: str,
-        tool: str,
-        arguments: Mapping[str, Any] | None = None,
-        *,
-        result: CallToolResult | Mapping[str, Any] | None = None,
-        text: str | None = None,
-        height: int | str = 360,
-    ) -> RenderResult:
-        """Append an assistant message with a new widget to a ``ui.Chat`` and render into it.
-
-        Pass ``result`` when your agent loop already called the tool (uses
-        :meth:`render_result`); otherwise the tool is called (:meth:`call_and_render`).
-        """
-        tag = self.widget(height=height)
-        content = TagList(tag) if text is None else TagList(tags.p(text), tag)
-        await chat.append_message({"role": "assistant", "content": content})
-        if result is not None:
-            return await self.render_result(server, tool, arguments, result, target=tag)
-        return await self.call_and_render(server, tool, arguments, target=tag)
+        shown = await self._publish(w, token, "error", {"kind": "error", "payload": payload})
+        return RenderResult(
+            w.id,
+            server,
+            tool,
+            result,
+            uri,
+            "error" if shown else None,
+            tool_error=tool_error,
+            render_error=str(exc),
+        )
 
     def _render_message(
         self,
@@ -581,14 +631,27 @@ class MCPHost:
         }
 
     async def remove_widget(self, target: str | Tag) -> None:
-        """Tear down a widget's View and forget its state."""
+        """Tear down a widget's View and forget everything about it.
+
+        Afterwards the widget has no status (:meth:`widget_status` returns
+        ``None``) and no model context (:meth:`model_context` returns ``None``);
+        if it had context, model-context callbacks receive a cleared
+        :class:`ModelContextEvent`. Its in-flight View requests are cancelled,
+        renders still in progress for it are dropped, and later requests from
+        its View are rejected as stale. Rendering to the same id again starts
+        afresh.
+        """
         widget_id = self._resolve_target(target)
-        w = self._widgets.pop(widget_id, None)
-        if w is None:
-            return
-        await self._cancel_widget_tasks(w)
-        await self._send(w.id, "teardown", {})
-        self._update_status_value(widget_id, None)
+        removed: list[tuple[Widget | None, ModelContextEvent | None]] = []
+        await _set_reactive(lambda: removed.append(self._widgets.remove(widget_id)))
+        w, context = removed[0]
+        if w is not None:
+            await self._cancel_widget_tasks(w)
+            await self._send(w.id, "teardown", {})
+        if context is not None:
+            await self._notify_model_context(
+                ModelContextEvent(widget_id, context.server, context.tool, None, None)
+            )
 
     # -------------------------------------------------------------- callbacks
 
@@ -610,23 +673,29 @@ class MCPHost:
         return fn
 
     def model_context(self, target: str | Tag | None = None) -> Any:
-        """Reactive read of the latest model context (per widget, or all widgets)."""
-        contexts = self._model_context()
+        """Reactive read of the latest model context (per widget, or all widgets).
+
+        Returns the newest :class:`ModelContextEvent` a widget's View shared, or
+        ``None`` if it shared none, cleared it, or the widget was removed.
+        """
+        contexts = self._widgets.contexts()
         if target is None:
             return dict(contexts)
         return contexts.get(self._resolve_target(target))
 
     def widget_status(self, target: str | Tag) -> WidgetStatus | None:
-        """Reactive read of a widget's lifecycle status."""
-        return self._statuses().get(self._resolve_target(target))
+        """Reactive read of a widget's lifecycle status; ``None`` for an unknown or removed widget.
+
+        ``"waiting"`` (nothing rendered yet), ``"loading"`` (a render is in
+        progress in Python), ``"rendered"`` (the outcome was sent to the browser;
+        for a View, not yet initialized), ``"initialized"`` (the View completed
+        the MCP Apps handshake in the browser: the only status that confirms it
+        is running) or ``"error"`` (Python could not render, or the browser
+        failed to load the sandbox or start the View).
+        """
+        return self._widgets.statuses().get(self._resolve_target(target))
 
     # ----------------------------------------------------------- browser RPC
-
-    def _widget(self, widget_id: str) -> _Widget:
-        w = self._widgets.get(widget_id)
-        if w is None:
-            w = self._widgets[widget_id] = _Widget(widget_id)
-        return w
 
     async def _send(self, widget_id: str, kind: str, payload: dict[str, Any], **extra: Any) -> None:
         if self._closed:
@@ -644,20 +713,11 @@ class MCPHost:
         except Exception as e:  # noqa: BLE001 - session may be closing
             logger.debug("Could not send %s to %s: %r", kind, widget_id, e)
 
-    def _update_status_value(self, widget_id: str, status: WidgetStatus | None) -> None:
-        with reactive.isolate():
-            current = dict(self._statuses())
-        if status is None:
-            current.pop(widget_id, None)
-        else:
-            current[widget_id] = status
-        self._statuses.set(current)
-
-    async def _push_render(self, w: _Widget) -> None:
+    async def _push_render(self, w: Widget) -> None:
         if w.render is not None and w.mount_id is not None:
             await self._send(w.id, "render", w.render.message, mount_id=w.mount_id)
 
-    async def _cancel_widget_tasks(self, w: _Widget) -> None:
+    async def _cancel_widget_tasks(self, w: Widget) -> None:
         """Cancel a widget's in-flight View requests and settle each one in the browser."""
         tasks, w.tasks = w.tasks, {}
         for t in tasks:
@@ -681,7 +741,7 @@ class MCPHost:
     async def _dispatch(self, env: Envelope) -> dict[str, Any]:
         done_ok: dict[str, Any] = {"status": "done", "ok": True, "result": {}}
         if env.kind == "mount":
-            w = self._widget(env.widget_id)
+            w = self._widgets.get_or_create(env.widget_id)
             if w.mount_id != env.mount_id:
                 await self._cancel_widget_tasks(w)
             w.mount_id = env.mount_id
@@ -699,14 +759,13 @@ class MCPHost:
             w.mount_id = None
             await self._cancel_widget_tasks(w)
             if w.status == "initialized":
-                w.status = "rendered"
-                self._update_status_value(w.id, "rendered")
+                self._widgets.set_status(w, "rendered")
             return done_ok
         if env.kind == "view-error":
             message = str(env.payload.get("message", ""))[:2000]
-            logger.warning("View error in widget %s: %s", w.id, message)
-            w.status = "error"
-            self._update_status_value(w.id, "error")
+            code = str(env.payload.get("code", "view_failed"))[:64]
+            logger.warning("View error in widget %s [%s]: %s", w.id, code, message)
+            self._widgets.set_status(w, "error")
             return done_ok
 
         render = w.render
@@ -714,8 +773,7 @@ class MCPHost:
             raise MCPHostError("Request from a stale View")
 
         if env.kind == "initialized":
-            w.status = "initialized"
-            self._update_status_value(w.id, "initialized")
+            self._widgets.set_status(w, "initialized")
             return done_ok
         if env.kind == "log":
             logger.info("[view %s] %s", w.id, json.dumps(env.payload.get("params"))[:2000])
@@ -734,7 +792,7 @@ class MCPHost:
             return self._start_request(w, render, env)
         raise MCPHostError(f"Unhandled kind {env.kind!r}")
 
-    def _start_request(self, w: _Widget, render: _Render, env: Envelope) -> dict[str, Any]:
+    def _start_request(self, w: Widget, render: Render, env: Envelope) -> dict[str, Any]:
         if env.request_id is None:
             raise MCPHostError("request_id is required")
         if len(w.tasks) >= self.policy.max_pending_per_widget:
@@ -753,7 +811,7 @@ class MCPHost:
         task.add_done_callback(lambda t: w.tasks.pop(t, None))
         return {"status": "pending"}
 
-    async def _respond(self, w: _Widget, env: Envelope, run: Callable[[], Awaitable[Any]]) -> None:
+    async def _respond(self, w: Widget, env: Envelope, run: Callable[[], Awaitable[Any]]) -> None:
         try:
             result = await run()
             payload: dict[str, Any] = {"ok": True, "result": result}
@@ -764,7 +822,7 @@ class MCPHost:
             payload = {"ok": False, "error": {"code": "host_error", "message": type(e).__name__}}
         await self._send(w.id, "response", payload, mount_id=env.mount_id, request_id=env.request_id)
 
-    async def _view_tool_call(self, render: _Render, params: dict[str, Any]) -> Any:
+    async def _view_tool_call(self, render: Render, params: dict[str, Any]) -> Any:
         name = params.get("name")
         arguments = params.get("arguments") or {}
         if not isinstance(name, str) or not isinstance(arguments, Mapping):
@@ -783,7 +841,7 @@ class MCPHost:
         logger.info("View tools/call %s.%s", render.server, name)
         return to_wire(await conn.call_tool(name, arguments))
 
-    async def _view_resource_read(self, render: _Render, params: dict[str, Any]) -> Any:
+    async def _view_resource_read(self, render: Render, params: dict[str, Any]) -> Any:
         uri = params.get("uri")
         if not isinstance(uri, str) or len(uri) > 2048:
             raise MCPHostError("Invalid resources/read params")
@@ -792,7 +850,7 @@ class MCPHost:
             raise ResourceError("Resource exceeds the size limit")
         return result
 
-    async def _handle_model_context(self, w: _Widget, render: _Render, params: Any) -> dict[str, Any]:
+    async def _handle_model_context(self, w: Widget, render: Render, params: Any) -> dict[str, Any]:
         if not isinstance(params, Mapping):
             raise MCPHostError("Invalid model context params")
         if len(json.dumps(params)) > self.policy.max_tool_payload_bytes:
@@ -806,18 +864,15 @@ class MCPHost:
             content=list(content) if isinstance(content, list) else None,
             structured_content=dict(structured) if isinstance(structured, Mapping) else None,
         )
-        with reactive.isolate():
-            contexts = dict(self._model_context())
-        if event.cleared:
-            contexts.pop(w.id, None)
-        else:
-            contexts[w.id] = event
-        self._model_context.set(contexts)
-        for cb in list(self._model_context_callbacks):
-            await _maybe_await(cb(event))
+        self._widgets.set_context(event)
+        await self._notify_model_context(event)
         return {"status": "done", "ok": True, "result": {}}
 
-    async def _handle_message(self, w: _Widget, render: _Render, params: Any) -> dict[str, Any]:
+    async def _notify_model_context(self, event: ModelContextEvent) -> None:
+        for cb in list(self._model_context_callbacks):
+            await _maybe_await(cb(event))
+
+    async def _handle_message(self, w: Widget, render: Render, params: Any) -> dict[str, Any]:
         if not isinstance(params, Mapping) or not isinstance(params.get("content"), list):
             raise MCPHostError("Invalid message params")
         if len(json.dumps(params)) > self.policy.max_tool_payload_bytes:
@@ -841,16 +896,27 @@ class MCPHost:
         """Cancel pending requests, tear down Views and close MCP transports."""
         if self._closed:
             return
-        for w in list(self._widgets.values()):
+        for w in self._widgets.all():
             await self._cancel_widget_tasks(w)
         self._closed = True
         try:
             self.session.root_scope().set_message_handler(self._handler_name, None)
         except Exception:  # noqa: BLE001
             pass
-        self._widgets.clear()
+        try:
+            self._widgets.clear()
+        except Exception:  # noqa: BLE001 - reactive state may already be gone at session end
+            pass
         await asyncio.gather(*(c.close() for c in self._servers.values()), return_exceptions=True)
         logger.info("MCPHost %s closed", self.id)
+
+
+def _require_outcome(result: object, error: str | None) -> None:
+    if (result is None) == (error is None):
+        raise ValueError(
+            "Pass exactly one of result= (the tool result you already have) or error= (why the "
+            "call failed). Render methods never call the tool; use call_and_render() for that."
+        )
 
 
 def _result_text(result: CallToolResult) -> str:

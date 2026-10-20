@@ -1,7 +1,7 @@
 """Sales explorer: an interactive MCP App in ui.Chat, with a round trip back to Python.
 
 1. Ask "show me sales" -> the "agent" calls the explore_sales tool and the
-   interactive explorer is rendered inside its chat reply (render_result: the
+   interactive explorer is rendered inside its chat reply (render_in_chat: the
    tool is not called twice).
 2. Change filters in the explorer -> the View calls query_sales through Python.
 3. Click a region -> the View shares the selection as model context; the
@@ -10,6 +10,16 @@
    answers using the selection and another tool call.
 
 No LLM is needed: `plan()` below stands in for one. Run everything with `make demo`.
+
+Configuration (environment variables; all optional locally):
+
+- MCP_SERVER_URL         the sales MCP server (default http://127.0.0.1:3001/mcp)
+- MCP_SERVER_API_KEY     sent as "Authorization: Key <value>" (e.g. a Posit Connect API key);
+                         it stays in Python and never reaches the browser
+- SHINY_MCP_SANDBOX_URL  a deployed sandbox (.../sandbox.html) on its own hostname; when unset,
+                         a development sandbox is started on http://localhost:SANDBOX_PORT (8765)
+
+docs/deployment.md deploys this file unchanged.
 """
 
 from __future__ import annotations
@@ -20,11 +30,16 @@ import re
 
 from shiny import App, reactive, render, ui
 
-from shiny_mcp_host import MCPHost
+from shiny_mcp_host import MCPHost, MCPHostError
 from shiny_mcp_host.sandbox import start_sandbox_server
 
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:3001/mcp")
-sandbox = start_sandbox_server(port=int(os.environ.get("SANDBOX_PORT", "8765")))
+MCP_HEADERS = {"Authorization": f"Key {key}"} if (key := os.environ.get("MCP_SERVER_API_KEY")) else None
+# A deployed sandbox on its own hostname, or a local development one.
+SANDBOX_URL = (
+    os.environ.get("SHINY_MCP_SANDBOX_URL")
+    or start_sandbox_server(port=int(os.environ.get("SANDBOX_PORT", "8765"))).url
+)
 
 REGIONS = ["North", "South", "East", "West"]
 PRODUCTS = ["Widgets", "Gadgets", "Gizmos", "Doohickeys"]
@@ -70,8 +85,8 @@ app_ui = ui.page_sidebar(
 
 def server(input, output, session):
     chat = ui.Chat(id="chat", history=False)
-    host = MCPHost(session, sandbox_url=sandbox.url)
-    host.add_server("sales", url=MCP_SERVER_URL)
+    host = MCPHost(session, sandbox_url=SANDBOX_URL)
+    host.add_server("sales", url=MCP_SERVER_URL, headers=MCP_HEADERS)
     question = reactive.value(None)
     latest = reactive.value(None)
 
@@ -86,13 +101,17 @@ def server(input, output, session):
             await chat.append_message("Ask me about sales, for example *show me sales by region*.")
             return
         # Your agent loop makes the tool call...
-        result = await host.call_tool("sales", "explore_sales", args)
+        try:
+            result = await host.call_tool("sales", "explore_sales", args)
+        except MCPHostError as e:
+            await chat.append_message(f"Sorry, the sales tool failed: {e}")
+            return
         # ...and the host renders the View for that result, without calling again.
         out = await host.render_in_chat(
-            chat, "sales", "explore_sales", args, result=result, text="Here's the explorer:", height=480
+            chat, "sales", "explore_sales", args, result, text="Here's the explorer:", height=480
         )
-        if not out.ok:
-            await chat.append_message(f"Sorry, I couldn't show the explorer: {out.error}")
+        if out.render_error:
+            await chat.append_message(f"Sorry, I couldn't show the explorer: {out.render_error}")
 
     @host.on_message
     def _(event):

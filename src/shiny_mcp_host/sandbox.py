@@ -15,6 +15,12 @@ or in-process (development)::
     from shiny_mcp_host.sandbox import start_sandbox_server
     sandbox = start_sandbox_server(port=8765)
     MCPHost(session, sandbox_url=sandbox.url)
+
+Check a deployed sandbox from the command line (server and headers only; it
+cannot tell whether a browser will embed it)::
+
+    shiny-mcp-sandbox --check https://sandbox.example.com/sandbox.html \
+        --host-origin https://app.example.com
 """
 
 from __future__ import annotations
@@ -24,7 +30,9 @@ import fnmatch
 import json
 import logging
 import re
+import secrets
 import socket
+import ssl
 import threading
 import time
 import urllib.request
@@ -32,6 +40,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -42,6 +52,9 @@ from ._version import __version__
 from .policy import CSP_KEYS, _is_valid_csp_source
 
 __all__ = (
+    "check_sandbox",
+    "frame_ancestors_verdict",
+    "SandboxCheck",
     "probe_sandbox",
     "sandbox_app",
     "build_csp_header",
@@ -231,6 +244,267 @@ def probe_sandbox(host: str, port: int, timeout: float = 2.0) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class SandboxCheck:
+    """One finding of :func:`check_sandbox`.
+
+    ``inconclusive`` findings are not passes (``ok`` is ``False``): the check
+    could not decide, e.g. a header used a form it does not model.
+    """
+
+    name: str
+    ok: bool
+    detail: str
+    inconclusive: bool = False
+
+    @property
+    def label(self) -> str:
+        return "PASS" if self.ok else "INCONCLUSIVE" if self.inconclusive else "FAIL"
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_HOST_SOURCE = re.compile(
+    r"^(?:(?P<scheme>[a-z][a-z0-9+.-]*)://)?"
+    r"(?P<host>\*|(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])"
+    r"(?::(?P<port>\d{1,5}|\*))?(?P<path>/\S*)?$"
+)
+
+
+def _source_matches(source: str, url_origin: str, self_origin: str) -> bool | None:
+    """Does one CSP ``frame-ancestors`` source expression match an origin?
+
+    Follows CSP Level 3 matching for the forms ``frame-ancestors`` allows
+    (``*``, ``'self'``, ``'none'``, scheme-sources and host-sources, including
+    ``*.`` host and ``*`` port wildcards and the http -> https upgrade).
+    Returns ``None`` for anything it does not model (e.g. a host-source with a
+    path), so callers report the result as inconclusive rather than guess.
+    """
+    s = source.strip().lower()
+    url = urlsplit(url_origin)
+    scheme, host = url.scheme, (url.hostname or "")
+    port = url.port or _DEFAULT_PORTS.get(scheme)
+    if s == "*":
+        return scheme in ("http", "https")
+    if s == "'self'":
+        return url_origin == self_origin
+    if s.startswith("'"):  # 'none' and keywords that never match in frame-ancestors
+        return False
+    if re.fullmatch(r"[a-z][a-z0-9+.-]*:", s):  # scheme-source, e.g. https:
+        return s[:-1] == scheme or (s == "http:" and scheme == "https")
+    m = _HOST_SOURCE.match(s)
+    if m is None or (m["path"] or "/") != "/":
+        return None
+    src_scheme = m["scheme"] or urlsplit(self_origin).scheme
+    if not (src_scheme == scheme or (src_scheme == "http" and scheme == "https")):
+        return False
+    src_host = m["host"].strip("[]")
+    if src_host == "*":
+        pass
+    elif src_host.startswith("*."):
+        if not host.endswith(src_host[1:]):
+            return False
+    elif src_host != host:
+        return False
+    if m["port"] == "*":
+        return True
+    if m["port"] is None:
+        return port == _DEFAULT_PORTS.get(scheme)
+    src_port = int(m["port"])
+    return src_port == port or (src_port == 80 and port == 443 and scheme == "https")
+
+
+def frame_ancestors_verdict(policies: Sequence[str], host_origin: str, self_origin: str) -> tuple[str, str]:
+    """Whether every CSP policy lets ``host_origin`` embed a page served from ``self_origin``.
+
+    ``policies`` are ``Content-Security-Policy`` header values (comma-joined
+    policies are split). Every policy is enforced, and within a policy only its
+    first ``frame-ancestors`` directive counts. Returns ``(verdict, detail)``
+    with verdict ``"allows"``, ``"blocks"``, ``"inconclusive"`` or ``"absent"``
+    (no policy restricts framing).
+    """
+    found: list[str] = []
+    verdicts: list[str] = []
+    for header in policies:
+        for policy in header.split(","):
+            directive = next(
+                (d.strip() for d in policy.split(";") if d.strip().lower().startswith("frame-ancestors")),
+                None,
+            )
+            if directive is None:
+                continue
+            sources = directive.split()[1:]
+            results = [_source_matches(src, host_origin, self_origin) for src in sources]
+            verdict = (
+                "allows"
+                if any(r is True for r in results)
+                else "inconclusive"
+                if None in results
+                else "blocks"
+            )
+            found.append(f"{directive!r}: {verdict}")
+            verdicts.append(verdict)
+    if not verdicts:
+        return "absent", "no frame-ancestors directive"
+    overall = "blocks" if "blocks" in verdicts else "inconclusive" if "inconclusive" in verdicts else "allows"
+    return overall, "; ".join(found)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _fetch(url: str, timeout: float) -> tuple[int, Any, bytes]:
+    """GET without following redirects: (status, headers, first bytes of body)."""
+    opener = urllib.request.build_opener(_NoRedirect)
+    request = urllib.request.Request(url, headers={"User-Agent": f"shiny-mcp-sandbox-check/{__version__}"})
+    try:
+        with opener.open(request, timeout=timeout) as r:
+            return r.status, r.headers, r.read(65536)
+    except HTTPError as e:
+        return e.code, e.headers, e.read(4096) if e.fp else b""
+
+
+def _describe_network_error(e: BaseException) -> str:
+    reason = e.reason if isinstance(e, URLError) else e
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"TLS certificate not accepted ({reason.verify_message}); is the hostname on the certificate?"
+    if isinstance(reason, ssl.SSLError):
+        return f"TLS handshake failed ({reason})"
+    if isinstance(reason, socket.gaierror):
+        return f"DNS lookup failed ({reason}); does the sandbox hostname resolve?"
+    return f"could not connect ({reason})"
+
+
+def check_sandbox(sandbox_url: str, host_origin: str, *, timeout: float = 10.0) -> list[SandboxCheck]:
+    """Check a deployed sandbox from the server side, as far as HTTP allows.
+
+    Verifies that ``sandbox_url`` is on a different origin than ``host_origin``
+    (the Shiny app's origin as browsers see it), answers directly (no redirect,
+    no login page) over working TLS, is a shiny-mcp-host sandbox, allows
+    ``host_origin`` to embed it, and carries no header that would stop a
+    browser from framing it (``X-Frame-Options``, an extra
+    ``frame-ancestors``). Passing does **not** prove a browser can embed it
+    (cookies, extensions, network paths and browser policy are not visible
+    here): confirm with a rendered widget reaching ``data-state="ready"``.
+    """
+    checks: list[SandboxCheck] = []
+
+    def add(name: str, ok: bool, detail: str) -> bool:
+        checks.append(SandboxCheck(name, ok, detail))
+        return ok
+
+    parts = urlsplit(sandbox_url)
+    host = urlsplit(host_origin)
+    sandbox_origin = f"{parts.scheme}://{parts.netloc}".lower()
+    host_origin = f"{host.scheme}://{host.netloc}".lower()
+    if not add(
+        "url",
+        parts.scheme in ("http", "https") and bool(parts.netloc) and parts.path.endswith("/sandbox.html"),
+        f"{sandbox_url} (expected an http(s) URL ending in /sandbox.html)",
+    ):
+        return checks
+    if not add(
+        "distinct origin",
+        sandbox_origin != host_origin,
+        f"sandbox {sandbox_origin} vs app {host_origin}; they must differ (use a second hostname)",
+    ):
+        return checks
+    if (parts.hostname or "") == (host.hostname or ""):
+        add("distinct hostname", False, "only the port differs: cookies are shared across ports")
+    if host.scheme == "https":
+        add("https", parts.scheme == "https", "an https app can only embed an https sandbox")
+
+    nonce = secrets.token_urlsafe(16)
+    page = f"{sandbox_url}?{urlencode({'host': host_origin, 'nonce': nonce})}"
+    try:
+        status, headers, body = _fetch(page, timeout)
+    except (URLError, OSError) as e:
+        add("reachable", False, f"{sandbox_url}: {_describe_network_error(e)}")
+        return checks
+    location = headers.get("Location") if headers else None
+    if 300 <= status < 400:
+        add(
+            "reachable",
+            False,
+            f"HTTP {status} redirect to {location!r}. The sandbox hostname must serve the page itself; "
+            "a redirect (to the main hostname or a login page) defeats the separate origin.",
+        )
+        return checks
+    text = body.decode("utf-8", "replace")
+    if status == 403 and "Embedding origin not allowed" in text:
+        add(
+            "reachable",
+            False,
+            f"HTTP 403 from the sandbox: {host_origin} is not in its allowed_host_origins "
+            "(SHINY_APP_ORIGIN for the Connect example).",
+        )
+        return checks
+    if status in (401, 403):
+        add(
+            "reachable",
+            False,
+            f"HTTP {status}: the sandbox requires authentication. Browsers carry no login to the "
+            "sandbox hostname; give it anonymous access (it holds no data).",
+        )
+        return checks
+    if not add("reachable", status == 200, f"HTTP {status} from {sandbox_url}"):
+        return checks
+    add(
+        "is sandbox page",
+        '<script src="sandbox.js"></script>' in text,
+        "response is the shiny-mcp-host sandbox page" if "sandbox.js" in text else "unexpected body",
+    )
+
+    policies = headers.get_all("Content-Security-Policy") or []
+    verdict, found = frame_ancestors_verdict(policies, host_origin, sandbox_origin)
+    explain = {
+        "allows": f"every policy lets {host_origin} embed the sandbox",
+        "blocks": f"a policy does not allow {host_origin}; browsers will refuse to embed the sandbox "
+        "(an extra policy, e.g. from a proxy, blocks even if the sandbox's own allows)",
+        "inconclusive": "a source expression this check does not model; confirm in a browser",
+        "absent": "the sandbox's own frame-ancestors header is missing (stripped by a proxy?)",
+    }[verdict]
+    checks.append(
+        SandboxCheck(
+            "frame-ancestors",
+            verdict == "allows",
+            f"{explain}. Directives: {found}",
+            inconclusive=verdict == "inconclusive",
+        )
+    )
+    add(
+        "restrictive CSP",
+        any("default-src 'none'" in p and "connect-src 'none'" in p for p in policies),
+        "default-src 'none' and connect-src 'none' by default" if policies else "no CSP header",
+    )
+    xfo = headers.get("X-Frame-Options")
+    add("no X-Frame-Options", xfo is None, f"X-Frame-Options: {xfo}" if xfo else "absent")
+
+    try:
+        status, headers, _ = _fetch(urljoin(sandbox_url, "sandbox.js"), timeout)
+        ctype = headers.get("Content-Type", "") if headers else ""
+        add(
+            "sandbox.js",
+            status == 200 and "javascript" in ctype,
+            f"HTTP {status}, {ctype or 'no content type'}",
+        )
+    except (URLError, OSError) as e:
+        add("sandbox.js", False, _describe_network_error(e))
+    try:
+        status, _, body = _fetch(urljoin(sandbox_url, "healthz"), timeout)
+        data = json.loads(body) if status == 200 else {}
+        version = data.get("version") if isinstance(data, dict) else None
+        add(
+            "version",
+            isinstance(data, dict) and data.get("service") == SERVICE_NAME,
+            f"shiny-mcp-host sandbox {version}" if version else f"HTTP {status} from healthz",
+        )
+    except (URLError, OSError, ValueError) as e:
+        add("version", False, str(e))
+    return checks
+
+
 def start_sandbox_server(
     port: int = 8765,
     *,
@@ -284,7 +558,9 @@ def start_sandbox_server(
 def main(argv: Sequence[str] | None = None) -> None:
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Serve the shiny-mcp-host sandbox proxy.")
+    parser = argparse.ArgumentParser(
+        description="Serve the shiny-mcp-host sandbox proxy, or --check a deployed one."
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -294,7 +570,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Shiny app origin allowed to embed the sandbox (repeatable; supports '*' "
         f"port wildcards). Default: {' '.join(DEFAULT_HOST_ORIGINS)}",
     )
+    parser.add_argument(
+        "--check",
+        metavar="SANDBOX_URL",
+        help="Instead of serving, check a deployed sandbox (.../sandbox.html) from the server side: "
+        "reachability, redirects, TLS and embedding headers. Needs --host-origin.",
+    )
+    parser.add_argument(
+        "--host-origin", help="With --check: the Shiny app's origin, e.g. https://app.example.com"
+    )
     args = parser.parse_args(argv)
+    if args.check:
+        if not args.host_origin:
+            parser.error("--check needs --host-origin")
+        checks = check_sandbox(args.check, args.host_origin)
+        for c in checks:
+            print(f"{c.label}  {c.name}: {c.detail}")
+        ok = all(c.ok for c in checks)
+        print(
+            "\nServer-side checks passed. This does not prove browser embedding: confirm that a "
+            'rendered widget reaches data-state="ready".'
+            if ok
+            else "\nServer-side checks did not all pass (INCONCLUSIVE counts as not passed); see "
+            "docs/posit-connect-validation.md#7-failure-diagnosis."
+        )
+        raise SystemExit(0 if ok else 1)
     logging.basicConfig(level=logging.INFO)
     uvicorn.run(sandbox_app(args.origins or DEFAULT_HOST_ORIGINS), host=args.host, port=args.port)
 

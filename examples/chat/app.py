@@ -12,7 +12,7 @@ import os
 
 from shiny import App, ui
 
-from shiny_mcp_host import MCPHost
+from shiny_mcp_host import MCPHost, MCPHostError
 from shiny_mcp_host.sandbox import start_sandbox_server
 
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:3001/mcp")
@@ -45,11 +45,17 @@ def server(input, output, session):
     @chat.on_user_submit
     async def _(user_input: str):
         if "time" in user_input.lower():
-            result = await host.render_in_chat(
-                chat, "demo", "get-time", {}, text="Here is the server time:", height=420
+            # Execute once; render_in_chat only displays the outcome (it never calls the tool).
+            result, error = None, None
+            try:
+                result = await host.call_tool("demo", "get-time", {})
+            except MCPHostError as e:
+                error = str(e)  # the View still opens, and is told the call failed
+            out = await host.render_in_chat(
+                chat, "demo", "get-time", {}, result, error=error, text="Here is the server time:", height=420
             )
-            if not result.ok:
-                await chat.append_message(f"Sorry, the tool failed: {result.error}")
+            if out.tool_failed or out.render_error:
+                await chat.append_message(f"Sorry, that didn't work: {out.render_error or out.tool_error}")
         else:
             await chat.append_message("I only know how to tell the time. Ask me *what time is it?*")
 
