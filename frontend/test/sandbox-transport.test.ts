@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HostError, SandboxTransport, loadSandboxProxy } from "../src/sandbox";
+import { HostError, OPAQUE_ORIGIN, SandboxTransport, loadSandboxProxy } from "../src/sandbox";
 
 function dispatch(data: unknown, origin: string, source: unknown) {
   window.dispatchEvent(new MessageEvent("message", { data, origin, source: source as MessageEventSource }));
@@ -37,6 +37,24 @@ describe("SandboxTransport", () => {
     await t.close();
     await t.send({ jsonrpc: "2.0", method: "x" } as never);
     expect(posted).toHaveLength(1);
+  });
+
+  it("trusted mode: binds to an opaque-origin View, posts with '*', drops sandbox-* methods", async () => {
+    const posted: [unknown, string][] = [];
+    const target = { postMessage: (m: unknown, o: string) => posted.push([m, o]) } as unknown as Window;
+    const t = new SandboxTransport(target, OPAQUE_ORIGIN);
+    const got: unknown[] = [];
+    t.onmessage = (m) => got.push(m);
+    await t.start();
+    const msg = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "x" } };
+    dispatch(msg, "null", target);
+    dispatch(msg, "null", window); // wrong source window
+    dispatch(msg, "http://localhost:8765", target); // a real origin: the frame was given allow-same-origin
+    dispatch({ jsonrpc: "2.0", method: "ui/notifications/sandbox-resource-ready", params: { html: "x" } }, "null", target);
+    expect(got).toEqual([msg]);
+    await t.send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: {} } as never);
+    expect(posted[0][1]).toBe("*");
+    await t.close();
   });
 });
 

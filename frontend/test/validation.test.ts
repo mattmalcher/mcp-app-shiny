@@ -8,6 +8,7 @@ import {
   safeLinkUrl,
   sandboxPageUrl,
   sanitizeInnerSandbox,
+  withMetaCsp,
 } from "../src/validation";
 
 describe("safeLinkUrl", () => {
@@ -87,4 +88,28 @@ it("randomToken / clampHeight", () => {
   expect(clampHeight(-5)).toBe(0);
   expect(clampHeight("100")).toBeNull();
   expect(clampHeight(Number.NaN)).toBeNull();
+});
+
+describe("withMetaCsp", () => {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'">`;
+  it("goes first in <head>", () => {
+    expect(withMetaCsp(`<!doctype html><html><head lang="en"><script>x</script></head></html>`, "default-src 'none'")).toBe(
+      `<!doctype html><html><head lang="en">${meta}<script>x</script></head></html>`,
+    );
+  });
+  it("goes after <html> or the doctype when there is no <head>, never before the doctype", () => {
+    expect(withMetaCsp(`<!DOCTYPE html><html lang="en"><body>x`, "default-src 'none'")).toBe(
+      `<!DOCTYPE html><html lang="en">${meta}<body>x`,
+    );
+    expect(withMetaCsp(`<!doctype html><script>x</script>`, "default-src 'none'")).toBe(
+      `<!doctype html>${meta}<script>x</script>`,
+    );
+    expect(withMetaCsp(`<p>x</p>`, "default-src 'none'")).toBe(`${meta}<p>x</p>`);
+  });
+  it("does not match <header>", () => {
+    expect(withMetaCsp(`<header>h</header>`, "a")).toBe(`<meta http-equiv="Content-Security-Policy" content="a"><header>h</header>`);
+  });
+  it("escapes the attribute value", () => {
+    expect(withMetaCsp("", `a "b" & <c>`)).toContain(`content="a &quot;b&quot; &amp; &lt;c>"`);
+  });
 });

@@ -14,9 +14,9 @@ import {
   type McpUiResourcePermissions,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { CallToolResult } from "@modelcontextprotocol/client";
-import { HostError, SandboxTransport, loadSandboxProxy } from "./sandbox";
+import { HostError, OPAQUE_ORIGIN, SandboxTransport, createTrustedViewFrame, loadSandboxProxy } from "./sandbox";
 import { CUSTOM_MESSAGE_TYPE, RpcRequestError, ShinyRpc, type ServerMessage, shiny, shinyConnected } from "./shiny-transport";
-import { checkSandboxUrl, clampHeight, innerSandbox, randomToken, safeLinkUrl } from "./validation";
+import { checkSandboxUrl, clampHeight, innerSandbox, randomToken, safeLinkUrl, withMetaCsp } from "./validation";
 
 const HOST_INFO = { name: "shiny-mcp-host", version: "0.1.0" };
 const PROXY_TIMEOUT_MS = 15_000;
@@ -37,7 +37,8 @@ interface RenderMessage {
   tool_input: { arguments: Record<string, unknown> };
   tool_result: CallToolResult | null;
   tool_cancelled: { reason: string } | null;
-  sandbox: { url: string; view_same_origin: boolean };
+  /** Normal mode: a separate-origin sandbox. Trusted mode: no sandbox, CSP as a `<meta>` policy. */
+  sandbox: { url: string; view_same_origin: boolean } | { trusted: true; csp_policy: string };
   host_context: McpUiHostContext;
   capabilities: { open_links: boolean; resource_read: boolean };
 }
@@ -68,6 +69,11 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** A View handed its HTML; `initialized` settles when it completes the handshake. */
+interface LoadedView {
+  initialized: Promise<void>;
+}
+
 /** One running View (one render in one mount). */
 class ViewSession {
   private bridge?: AppBridge;
@@ -88,6 +94,33 @@ class ViewSession {
 
   async start(): Promise<void> {
     const { msg } = this;
+    const loaded = await ("trusted" in msg.sandbox ? this.startTrusted(msg.sandbox.csp_policy) : this.startSandboxed());
+    if (!loaded) return;
+    await withTimeout(
+      loaded.initialized,
+      INIT_TIMEOUT_MS,
+      new HostError("view_init_timeout", "The MCP App loaded in the sandbox but did not complete initialization"),
+    );
+    if (this.closed) return;
+    this.initialized = true;
+    // Per spec the host sends nothing to the View before `initialized`; then
+    // tool input exactly once, then the result (or cancellation) exactly once.
+    const bridge = this.bridge!;
+    await bridge.sendToolInput(msg.tool_input);
+    if (msg.tool_result) {
+      await bridge.sendToolResult(msg.tool_result);
+    } else {
+      await bridge.sendToolCancelled({ reason: msg.tool_cancelled?.reason ?? "Tool call failed" });
+    }
+    this.el.setStatus(null);
+    this.el.dataset.state = "ready";
+    this.request("initialized").catch(() => {});
+  }
+
+  /** Load the proxy from the sandbox origin and hand it the View; null if closed meanwhile. */
+  private async startSandboxed(): Promise<LoadedView | null> {
+    const { msg } = this;
+    if ("trusted" in msg.sandbox) throw new HostError("sandbox_config", "Not a sandboxed render");
     const check = checkSandboxUrl(msg.sandbox.url, window.location.origin, msg.sandbox.view_same_origin);
     if (!check.ok) throw new HostError("sandbox_config", `Unsafe sandbox configuration: ${check.reason}`);
     if (check.warning) log.warn(check.warning);
@@ -101,7 +134,7 @@ class ViewSession {
       timeoutMs: PROXY_TIMEOUT_MS,
       signal: this.abort.signal,
     });
-    if (this.closed) return;
+    if (this.closed) return null;
     this.iframe = iframe;
     this.el.classList.toggle("shiny-mcp-widget-bordered", !!msg.resource.prefers_border);
 
@@ -115,24 +148,30 @@ class ViewSession {
       permissions: msg.resource.permissions,
       sandbox: innerSandbox(msg.sandbox.view_same_origin),
     });
-    await withTimeout(
-      initialized,
-      INIT_TIMEOUT_MS,
-      new HostError("view_init_timeout", "The MCP App loaded in the sandbox but did not complete initialization"),
-    );
-    if (this.closed) return;
-    this.initialized = true;
-    // Per spec the host sends nothing to the View before `initialized`; then
-    // tool input exactly once, then the result (or cancellation) exactly once.
-    await bridge.sendToolInput(msg.tool_input);
-    if (msg.tool_result) {
-      await bridge.sendToolResult(msg.tool_result);
-    } else {
-      await bridge.sendToolCancelled({ reason: msg.tool_cancelled?.reason ?? "Tool call failed" });
-    }
-    this.el.setStatus(null);
-    this.el.dataset.state = "ready";
-    this.request("initialized").catch(() => {});
+    return { initialized };
+  }
+
+  /**
+   * Trusted mode: no proxy and no sandbox origin. The View runs directly in
+   * one opaque-origin iframe on this page and the bridge talks to it there.
+   */
+  private async startTrusted(cspPolicy: string): Promise<LoadedView | null> {
+    const { msg } = this;
+    const iframe = createTrustedViewFrame(this.el.frameHost, {
+      permissions: msg.resource.permissions,
+      title: `MCP App: ${msg.tool}`,
+    });
+    this.iframe = iframe;
+    this.el.classList.toggle("shiny-mcp-widget-bordered", !!msg.resource.prefers_border);
+
+    const bridge = this.createBridge();
+    this.bridge = bridge;
+    const initialized = new Promise<void>((resolve) => bridge.addEventListener("initialized", () => resolve()));
+    // Listen before the View document exists, so its first message cannot be missed.
+    await bridge.connect(new SandboxTransport(iframe.contentWindow!, OPAQUE_ORIGIN));
+    if (this.closed) return null;
+    iframe.srcdoc = withMetaCsp(msg.resource.html, cspPolicy);
+    return { initialized };
   }
 
   private createBridge(): AppBridge {

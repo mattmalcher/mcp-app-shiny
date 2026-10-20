@@ -23,10 +23,12 @@ that reason; a tool without a UI shows the error in the widget.
 
 ## `MCPHost`
 
-`MCPHost(session=None, *, id="mcp", sandbox_url=None, policy=None, theme="light")`:
+`MCPHost(session=None, *, id="mcp", sandbox_url=None, policy=None, theme="light", dangerously_trust_apps=False)`:
 one per Shiny session. `sandbox_url` falls back to `$SHINY_MCP_SANDBOX_URL`;
 without either, or when it is the app's own origin, it raises
 `SandboxConfigError` (the host never falls back to an unsafe setup).
+`dangerously_trust_apps=True` is the explicit exception: no sandbox at all,
+for apps you control ([trusted mode](architecture.md#trusted-mode-dangerously_trust_appstrue)).
 
 | Method | |
 |---|---|

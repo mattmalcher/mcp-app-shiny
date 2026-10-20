@@ -16,6 +16,12 @@ needs its own hostname, because it keeps third-party HTML away from your
 page's DOM, cookies and inputs. Without it the host refuses to render. See
 [architecture.md](architecture.md#why-the-sandbox-needs-its-own-hostname).
 
+**No second hostname, and you wrote every MCP App you host?**
+`MCPHost(session, dangerously_trust_apps=True)` runs Views without the
+sandbox server, so there is nothing extra to deploy. It is experimental and
+gives up guarantees the sandbox provides; read
+[trusted mode](architecture.md#trusted-mode-dangerously_trust_appstrue) first.
+
 ## Local development
 
 `start_sandbox_server(port=8765)` runs the sandbox in a background thread at

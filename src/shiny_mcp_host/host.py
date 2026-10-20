@@ -43,6 +43,7 @@ from .policy import (
     validate_open_link,
 )
 from .protocol import Envelope, extract_ui_html, get_tool_ui_resource_uri, parse_envelope, to_wire
+from .sandbox import build_csp_header
 
 __all__ = (
     "MCPHost",
@@ -209,7 +210,18 @@ class MCPHost:
         origin distinct from the Shiny app, e.g. by
         :func:`shiny_mcp_host.sandbox.start_sandbox_server`. Falls back to the
         ``SHINY_MCP_SANDBOX_URL`` environment variable. There is no unsafe
-        fallback: without it, :class:`SandboxConfigError` is raised.
+        fallback: without it, :class:`SandboxConfigError` is raised (unless
+        ``dangerously_trust_apps`` is set).
+    dangerously_trust_apps
+        Run Views without the separate-origin sandbox, for deployments that
+        cannot get a second hostname and only host apps you wrote. Each View
+        is loaded directly into one ``srcdoc`` iframe on the Shiny page,
+        without ``allow-same-origin`` and with its CSP in a ``<meta>`` tag.
+        This departs from the MCP Apps spec and drops guarantees the sandbox
+        gives (see docs/architecture.md, "Trusted mode"); only use it for
+        MCP servers whose HTML you control. ``HostPolicy`` still authorises
+        every tool call. Cannot be combined with ``sandbox_url`` or
+        ``HostPolicy(view_same_origin=True)``.
     policy
         Authorisation and limits; see :class:`HostPolicy`.
     theme
@@ -224,12 +236,31 @@ class MCPHost:
         sandbox_url: str | None = None,
         policy: HostPolicy | None = None,
         theme: Literal["light", "dark"] = "light",
+        dangerously_trust_apps: bool = False,
     ) -> None:
         self.session = require_active_session(session)
         self.id = self.session.ns(id)
         self.policy = policy or HostPolicy()
         self.theme = theme
-        self.sandbox_url = self._validate_sandbox_url(sandbox_url or os.environ.get(SANDBOX_URL_ENV))
+        self.trusted = dangerously_trust_apps
+        self.sandbox_url: str | None = None
+        if self.trusted:
+            if sandbox_url:
+                raise SandboxConfigError(
+                    "dangerously_trust_apps=True does not use a sandbox; drop sandbox_url."
+                )
+            if self.policy.view_same_origin:
+                raise SandboxConfigError(
+                    "view_same_origin cannot be combined with dangerously_trust_apps: the View would "
+                    "share the Shiny app's origin and could read the page, its cookies and inputs."
+                )
+            logger.warning(
+                "MCPHost %r: dangerously_trust_apps=True; MCP App Views run without the "
+                "separate-origin sandbox. Only connect MCP servers whose HTML you trust.",
+                self.id,
+            )
+        else:
+            self.sandbox_url = self._validate_sandbox_url(sandbox_url or os.environ.get(SANDBOX_URL_ENV))
         self._servers: dict[str, ServerConnection] = {}
         self._widgets = WidgetStore()
         self._model_context_callbacks: list[Callback] = []
@@ -616,7 +647,11 @@ class MCPHost:
             "tool_input": {"arguments": arguments},
             "tool_result": to_wire(result) if result is not None else None,
             "tool_cancelled": cancelled,
-            "sandbox": {"url": self.sandbox_url, "view_same_origin": self.policy.view_same_origin},
+            "sandbox": (
+                {"trusted": True, "csp_policy": build_csp_header(csp, None)}
+                if self.trusted
+                else {"url": self.sandbox_url, "view_same_origin": self.policy.view_same_origin}
+            ),
             "host_context": {
                 "theme": self.theme,
                 "platform": "web",

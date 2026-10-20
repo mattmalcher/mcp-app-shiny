@@ -1,7 +1,8 @@
 """Shiny app used by the browser tests, driven by the fixture MCP server.
 
 Tests send commands with ``Shiny.setInputValue("cmd", {...}, {priority: "event"})``.
-Sandbox URL comes from SHINY_MCP_SANDBOX_URL (started by the test harness).
+Sandbox URL comes from SHINY_MCP_SANDBOX_URL (started by the test harness);
+FIXTURE_TRUSTED=1 runs the host with dangerously_trust_apps=True instead.
 """
 
 import json
@@ -12,6 +13,7 @@ from shiny import App, reactive, render, ui
 from shiny_mcp_host import MCPHost, mcp_widget
 
 MCP_SERVER_URL = os.environ["MCP_SERVER_URL"]
+TRUSTED = os.environ.get("FIXTURE_TRUSTED") == "1"
 
 app_ui = ui.page_fluid(
     ui.h2("Fixture host"),
@@ -30,7 +32,7 @@ app_ui = ui.page_fluid(
 
 
 def server(input, output, session):
-    host = MCPHost(session)
+    host = MCPHost(session, dangerously_trust_apps=TRUSTED)
     host.add_server("fx", url=MCP_SERVER_URL)
     sent = reactive.value([])
     results = reactive.value({})

@@ -48,6 +48,12 @@
 
 ### Added
 
+- **Experimental trusted mode**: `MCPHost(session, dangerously_trust_apps=True)`
+  renders Views without a sandbox server or second hostname, for apps you
+  control. Each View runs in one opaque-origin `srcdoc` iframe with its CSP in
+  a `<meta>` tag; `HostPolicy` still authorises every request. See
+  [docs/architecture.md](docs/architecture.md#trusted-mode-dangerously_trust_appstrue).
+
 - `shiny-mcp-sandbox --check SANDBOX_URL --host-origin APP_ORIGIN` and
   `shiny_mcp_host.sandbox.check_sandbox()`: server-side diagnosis of a
   deployed sandbox (reachability, redirects, TLS, authentication,

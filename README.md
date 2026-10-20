@@ -39,7 +39,10 @@ Requires Python 3.11+. Installs Shiny and the MCP Python SDK; no Node.
 > routed to the same server is fine (a DNS alias, or a load-balancer rule that
 > *forwards* rather than redirects). A different path on the same hostname is
 > not enough.
-> Check this first: [docs/deployment.md](docs/deployment.md).
+> Check this first: [docs/deployment.md](docs/deployment.md). Only hosting
+> apps you wrote yourself? An experimental
+> [trusted mode](docs/architecture.md#trusted-mode-dangerously_trust_appstrue)
+> skips the sandbox.
 
 ## Use an existing MCP App
 

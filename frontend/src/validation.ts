@@ -9,6 +9,9 @@ export const INNER_SANDBOX_ALLOWED = ["allow-scripts", "allow-forms", "allow-sam
 /** Sandbox attribute of the outer proxy iframe (spec: allow-scripts + allow-same-origin). */
 export const OUTER_SANDBOX = "allow-scripts allow-same-origin allow-forms";
 
+/** Sandbox attribute of the single View iframe in trusted mode: opaque origin, no escapes. */
+export const TRUSTED_VIEW_SANDBOX = "allow-scripts allow-forms";
+
 export const SANDBOX_METHOD_PREFIX = "ui/notifications/sandbox-";
 export const PROXY_READY = "ui/notifications/sandbox-proxy-ready";
 export const RESOURCE_READY = "ui/notifications/sandbox-resource-ready";
@@ -85,6 +88,23 @@ export function checkSandboxUrl(sandboxUrl: unknown, pageOrigin: string, viewSam
     };
   }
   return { ok: true, origin: url.origin };
+}
+
+/**
+ * Insert a `<meta>` Content-Security-Policy as the first element the View
+ * document parses, so it applies before any of the View's own scripts.
+ * Used in trusted mode, where there is no sandbox server to send the header.
+ */
+export function withMetaCsp(html: string, policy: string): string {
+  const escaped = policy.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${escaped}">`;
+  // After <head>, else <html>, else the doctype (prepending before a doctype
+  // would force quirks mode); the parser puts the meta in the implied head.
+  for (const re of [/<head(\s[^>]*)?>/i, /<html(\s[^>]*)?>/i, /<!doctype[^>]*>/i]) {
+    const m = re.exec(html);
+    if (m) return html.slice(0, m.index + m[0].length) + meta + html.slice(m.index + m[0].length);
+  }
+  return meta + html;
 }
 
 /** Build the sandbox page URL for one mount. */

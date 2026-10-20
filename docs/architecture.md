@@ -140,4 +140,51 @@ Cookies are not isolated by port either, so production needs a second
 A design for deployments that cannot get a second hostname (an opaque-origin
 proxy built from inline HTML) is recorded in
 [protocol-contract.md](protocol-contract.md#without-a-second-hostname). It is
-not implemented: it departs from the spec and weakens some guarantees.
+not implemented: it departs from the spec and weakens some guarantees. What
+*is* available, for apps you wrote yourself, is trusted mode (below).
+
+### Trusted mode (`dangerously_trust_apps=True`)
+
+**Experimental, off by default.** For deployments without a second hostname
+whose MCP Apps all come from servers you control:
+
+```python
+host = MCPHost(session, dangerously_trust_apps=True)   # no sandbox_url
+```
+
+There is no sandbox server and no proxy. Each View is loaded straight into
+one iframe on the Shiny page, from `srcdoc`, with
+`sandbox="allow-scripts allow-forms"` (no `allow-same-origin`), and the
+`AppBridge` talks to it directly. Python builds the same CSP as the sandbox
+server and the browser puts it in a `<meta>` tag at the top of the View's
+HTML.
+
+What still holds:
+
+- The View runs in an **opaque origin**: it cannot read the Shiny page's DOM,
+  cookies, storage or Shiny inputs, open popups or navigate the top page.
+- The CSP still applies (no network access unless the resource declares it
+  and `HostPolicy` approves it).
+- **`HostPolicy` still authorises every tool call and resource read**, and
+  credentials still stay in Python.
+- The host still accepts messages only from that iframe's window.
+
+The malicious-View test passes unchanged in this mode
+(`tests/e2e/test_trusted_mode.py`). But none of that is a guarantee the way
+the separate origin is, which is why the flag is named as it is. What you give
+up:
+
+- **Not spec-compliant.** The MCP Apps spec requires the sandbox proxy on its
+  own origin; this mode has no proxy at all.
+- **CSP from `<meta>`, not a header.** `frame-ancestors` can't be expressed,
+  and a mistake in the HTML handling (e.g. the meta landing after a script)
+  would leave that script unrestricted.
+- **Messages to the View are posted with target origin `"*"`**, because an
+  opaque origin cannot be named. If the View navigates its own frame
+  elsewhere, the new page receives what the host sends next.
+- **No process isolation.** A separate hostname is a separate site and gets
+  its own browser process; an opaque-origin frame on your page may not.
+- **No `view_same_origin`.** It would give the View the Shiny page's origin,
+  so the combination is refused.
+
+Treat a server's HTML in this mode as code you are shipping in your app.

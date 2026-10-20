@@ -41,12 +41,15 @@ def sandbox_url(sandbox_server) -> str:
     return f"http://localhost:{sandbox_server.port}/sandbox.html"
 
 
-def _app(path: Path, mcp_url: str, sandbox_server) -> Iterator[procs.Proc]:
+def _app(
+    path: Path, mcp_url: str, sandbox_server, extra_env: dict[str, str] | None = None
+) -> Iterator[procs.Proc]:
     env = {
         "MCP_SERVER_URL": mcp_url,
         "SHINY_MCP_SANDBOX_URL": f"http://localhost:{sandbox_server.port}/sandbox.html",
         # Examples start an in-process sandbox; point them at the harness one.
         "SANDBOX_PORT": str(sandbox_server.port),
+        **(extra_env or {}),
     }
     p = procs.shiny_app(path, procs.free_port(), env)
     yield p
@@ -56,6 +59,17 @@ def _app(path: Path, mcp_url: str, sandbox_server) -> Iterator[procs.Proc]:
 @pytest.fixture(scope="session")
 def fixture_app(fixture_server, sandbox_server):
     yield from _app(ROOT / "tests/e2e/apps/fixture_app.py", f"{fixture_server.url}/mcp", sandbox_server)
+
+
+@pytest.fixture(scope="session")
+def trusted_fixture_app(fixture_server, sandbox_server):
+    # SHINY_MCP_SANDBOX_URL stays set: trusted mode must ignore the env var.
+    yield from _app(
+        ROOT / "tests/e2e/apps/fixture_app.py",
+        f"{fixture_server.url}/mcp",
+        sandbox_server,
+        {"FIXTURE_TRUSTED": "1"},
+    )
 
 
 @pytest.fixture(scope="session")
