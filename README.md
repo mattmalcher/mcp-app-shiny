@@ -20,18 +20,49 @@ supported.
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph MCP["MCP servers"]
+        tools["tools"]
+        res["ui:// HTML resources"]
+    end
+
+    subgraph PY["Shiny server · Python"]
+        host["MCPHost<br/>one per Shiny session"]
+        policy["HostPolicy<br/>tool allowlist · CSP · limits"]
+        conn["ServerConnection<br/>one per MCP server"]
+        host --> policy
+        host --> conn
+    end
+
+    subgraph SB["Sandbox server"]
+        sbsrv["sandbox.html + sandbox.js<br/>distinct origin · CSP header"]
+    end
+
+    subgraph BR["Browser"]
+        subgraph PAGE["Shiny page · app origin"]
+            widget["shiny-mcp-widget element<br/>in a page or a ui.Chat message"]
+            bridge["AppBridge<br/>one per View"]
+            widget --> bridge
+        end
+        subgraph OUTER["Outer iframe"]
+            proxy["Sandbox proxy · sandbox origin<br/>relays and filters messages"]
+            subgraph INNER["Inner iframe · opaque"]
+                view["MCP App View<br/>untrusted HTML"]
+            end
+        end
+    end
+
+    conn <-->|"MCP: Streamable HTTP or stdio"| MCP
+    host <-->|"makeRequest / custom messages<br/>correlated envelopes"| widget
+    bridge <-->|"postMessage<br/>source, origin and nonce checked"| proxy
+    proxy <-->|postMessage| view
+    sbsrv -.->|serves| proxy
 ```
-Shiny app (Python)                                  Browser
-┌───────────────────────────────┐                  ┌──────────────────────────────┐
-│ MCPHost (one per session)     │  makeRequest     │ Shiny page / ui.Chat         │
-│  ServerConnection per server  │◄────────────────►│ <shiny-mcp-widget> elements  │
-│  HostPolicy enforcement       │  custom messages │ AppBridge per View           │
-└──────────────┬────────────────┘                  └──────────────┬───────────────┘
-               │ MCP (Streamable HTTP / stdio)                    │ postMessage (origin +
-               ▼                                                  ▼ source + nonce checked)
-        MCP server: tools + ui:// resources        sandbox proxy iframe (other origin)
-                                                     └─ View iframe (opaque origin, CSP)
-```
+
+Python owns the MCP connections; the browser only relays validated View requests
+to it. Each View runs two iframes deep, on origins distinct from the Shiny page.
+See [docs/protocol-contract.md](docs/protocol-contract.md) for the message flow.
 
 ## Install
 
