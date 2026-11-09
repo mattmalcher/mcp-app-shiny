@@ -123,3 +123,11 @@ def sales_server(port: int) -> Proc:
         [sys.executable, str(ROOT / "examples/sales_explorer/server.py"), "--port", str(port)],
         port,
     )
+
+
+def shiny_in_shiny_server(port: int) -> Proc:
+    return Proc(
+        "shiny-in-shiny-server",
+        [sys.executable, str(ROOT / "examples/shiny_in_shiny/server.py"), "--port", str(port)],
+        port,
+    )

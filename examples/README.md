@@ -3,6 +3,7 @@
 | Example | Command | What it shows |
 |---|---|---|
 | [`sales_explorer/`](sales_explorer/) | `make demo` | **The showcase.** An interactive sales explorer in `ui.Chat`. The agent calls the tool once and the result is rendered with `render_in_chat` (no second call); filters call tools through Python; the selected region comes back as model context; the app's question is answered by Python. |
+| [`shiny_in_shiny/`](shiny_in_shiny/) | `make demo-shiny` | **Spike.** The View is itself a Shiny for Python app, its websocket replaced by MCP tool calls. The model moves its controls with a tool; moving them by hand shares the new view as model context. |
 | [`chat/app.py`](chat/app.py) | `make demo-clock` | Smoke test: the unmodified official ext-apps "Get Server Time" app (npm `@modelcontextprotocol/server-basic-vanillajs`) in `ui.Chat`. Shows rendering a failed call with `error=` instead of calling again. |
 | [`standalone/app.py`](standalone/app.py) | `make demo-standalone` | The same official app in a plain `ui.page_fluid`, with outputs for `ui/message` and model context. |
 | [`posit_connect/`](posit_connect/) | `make rehearse-connect` | Deployment: the sandbox as a standalone ASGI app, plus the sales explorer packaged as three Posit Connect content items. See [docs/deployment.md](../docs/deployment.md). |

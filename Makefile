@@ -5,7 +5,7 @@ DEMO_PORT ?= 3001
 APP_PORT  ?= 8000
 
 .PHONY: setup setup-dev setup-node vendor-sdk setup-compat build lint test-unit test-integration test-e2e test-security \
-        test-compat test-dist demo-server-bundle connect-bundles rehearse-connect rehearse-connect-trusted test demo demo-clock \
+        test-compat test-dist demo-server-bundle connect-bundles rehearse-connect rehearse-connect-trusted test demo demo-shiny demo-clock \
         demo-standalone clean
 
 setup:                  ## Python env from uv.lock: all you need for `make demo` (no Node)
@@ -73,6 +73,9 @@ test: lint test-unit test-integration test-e2e test-security test-dist test-comp
 
 demo:                   ## sales explorer showcase: MCP server + sandbox + Shiny chat app on http://127.0.0.1:8000
 	$(PY) scripts/demo.py sales
+
+demo-shiny:             ## spike: an MCP App View that is itself a Shiny app ("Shiny in Shiny")
+	$(PY) scripts/demo.py shiny
 
 demo-clock:             ## smoke test: official "Get Server Time" app in ui.Chat
 	$(PY) scripts/demo.py clock

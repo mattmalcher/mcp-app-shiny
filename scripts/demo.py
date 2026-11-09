@@ -1,6 +1,7 @@
 """One-command development demo: MCP server + sandbox + Shiny app.
 
-    python scripts/demo.py [sales|clock|standalone]   (make demo / demo-clock / demo-standalone)
+    python scripts/demo.py [sales|shiny|clock|standalone]
+    (make demo / demo-shiny / demo-clock / demo-standalone)
 
 Checks prerequisites and ports first, prints what is running where, and stops
 everything on Ctrl+C.
@@ -24,6 +25,10 @@ EXAMPLES = {
     "sales": (
         "examples/sales_explorer/app.py",
         "Sales explorer MCP server (examples/sales_explorer/server.py)",
+    ),
+    "shiny": (
+        "examples/shiny_in_shiny/app.py",
+        "Shiny-in-Shiny MCP server (examples/shiny_in_shiny/server.py)",
     ),
     "clock": ("examples/chat/app.py", "Official ext-apps 'Get Server Time' server (npm, unmodified)"),
     "standalone": (
@@ -69,10 +74,15 @@ def main() -> None:
     # Prerequisites, with the fix for each.
     if not (ROOT / "src/shiny_mcp_host/static/shiny-mcp-host.js").exists():
         fail("Browser bundle missing from src/shiny_mcp_host/static. Run `make setup-node` to rebuild it.")
-    if args.example == "sales":
+    if args.example in ("sales", "shiny"):
+        server_py = (
+            "examples/sales_explorer/server.py"
+            if args.example == "sales"
+            else "examples/shiny_in_shiny/server.py"
+        )
         mcp_cmd = [
             sys.executable,
-            str(ROOT / "examples/sales_explorer/server.py"),
+            str(ROOT / server_py),
             "--port",
             str(args.mcp_port),
         ]

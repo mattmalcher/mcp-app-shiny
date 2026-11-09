@@ -150,3 +150,12 @@ def sales_app(sandbox_server):
         yield from _app(ROOT / "examples/sales_explorer/app.py", f"{server.url}/mcp", sandbox_server)
     finally:
         server.stop()
+
+
+@pytest.fixture(scope="session")
+def shiny_in_shiny_app(sandbox_server):
+    server = procs.shiny_in_shiny_server(procs.free_port())
+    try:
+        yield from _app(ROOT / "examples/shiny_in_shiny/app.py", f"{server.url}/mcp", sandbox_server)
+    finally:
+        server.stop()
