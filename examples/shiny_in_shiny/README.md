@@ -74,3 +74,6 @@ when it's set, and `AppSession` takes any `Connection` (`send`, `receive`,
 
 Set `SHINY_VIEW_DEBUG=1` to have the inner app print every message it sends
 and receives.
+
+Data: `iris` (Fisher/Anderson) and `cars` (StatLib 1983 ASA Data Expo),
+converted to CSV from the copies in [vega-datasets](https://github.com/vega/vega-datasets).
